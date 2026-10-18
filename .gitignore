@@ -1,0 +1,31 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+
+# Output of 'go coverage'
+coverage.out
+coverage.html
+profile.out
+
+# Database & runtime files
+*.db
+*.db-shm
+*.db-wal
+finance-rt.db
+test.db
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# IDEs & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
