@@ -131,8 +131,17 @@ func (s *Server) Remaining(ctx context.Context, req *budgetv1.RemainingRequest) 
 		return nil, mapError(err)
 	}
 
+	remDaily := info.DailyLimitMicros - (info.DailySpentMicros + info.DailyReservedMicros)
+	if remDaily < 0 {
+		remDaily = 0
+	}
+	remMonthly := info.MonthlyLimitMicros - (info.MonthlySpentMicros + info.MonthlyReservedMicros)
+	if remMonthly < 0 {
+		remMonthly = 0
+	}
+
 	return &budgetv1.RemainingResponse{
-		DailyMicros:   info.DailySpentMicros + info.DailyReservedMicros,
-		MonthlyMicros: info.MonthlySpentMicros + info.MonthlyReservedMicros,
+		DailyMicros:   remDaily,
+		MonthlyMicros: remMonthly,
 	}, nil
 }

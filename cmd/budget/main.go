@@ -96,16 +96,20 @@ func startNATSServices(ctx context.Context, natsURL string, s *store.Store, logg
 		logger.ErrorContext(ctx, "failed to init nats streams", slog.Any("error", err))
 	}
 
-	relay := outbox.NewRelay(s, js)
+	relay := outbox.NewRelay(s, js, outbox.WithRelayLogger(logger))
 	go func() {
 		_ = relay.Run(ctx)
 	}()
 
 	var consumeCtx jetstream.ConsumeContext
-	consumer, err := outbox.NewConfigConsumer(s, js)
-	if err == nil {
+	consumer, err := outbox.NewConfigConsumer(s, js, outbox.WithConsumerLogger(logger))
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to create config consumer", slog.Any("error", err))
+	} else {
 		cCtx, cErr := consumer.Start(ctx)
-		if cErr == nil {
+		if cErr != nil {
+			logger.ErrorContext(ctx, "failed to start config consumer", slog.Any("error", cErr))
+		} else {
 			consumeCtx = cCtx
 		}
 	}
@@ -145,7 +149,7 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 	cleanupNATS := startNATSServices(ctx, cfg.NATSURL, budgetStore, logger)
 	defer cleanupNATS()
 
-	sw := sweeper.New(budgetStore, sweeper.WithInterval(30*time.Second))
+	sw := sweeper.New(budgetStore, sweeper.WithInterval(30*time.Second), sweeper.WithLogger(logger))
 	go func() {
 		_ = sw.Run(ctx)
 	}()

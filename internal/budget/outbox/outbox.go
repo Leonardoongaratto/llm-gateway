@@ -9,6 +9,7 @@ import (
 	eventsv1 "github.com/Leonardoongaratto/llm-gateway/gen/lgw/events/v1"
 	"github.com/Leonardoongaratto/llm-gateway/internal/budget/core"
 	"github.com/Leonardoongaratto/llm-gateway/internal/budget/store"
+	"github.com/Leonardoongaratto/llm-gateway/internal/kernel/money"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/natsx"
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -126,7 +127,17 @@ type ConfigConsumer struct {
 	logger   *slog.Logger
 }
 
-func NewConfigConsumer(s LimitsStore, js jetstream.JetStream) (*ConfigConsumer, error) {
+type ConsumerOption func(*ConfigConsumer)
+
+func WithConsumerLogger(l *slog.Logger) ConsumerOption {
+	return func(c *ConfigConsumer) {
+		if l != nil {
+			c.logger = l
+		}
+	}
+}
+
+func NewConfigConsumer(s LimitsStore, js jetstream.JetStream, opts ...ConsumerOption) (*ConfigConsumer, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -134,30 +145,29 @@ func NewConfigConsumer(s LimitsStore, js jetstream.JetStream) (*ConfigConsumer, 
 		Durable:       "budget-config-consumer",
 		FilterSubject: "lgw.config.changed.v1",
 		AckPolicy:     jetstream.AckExplicitPolicy,
+		MaxDeliver:    5,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create config consumer: %w", err)
 	}
 
-	return &ConfigConsumer{
+	c := &ConfigConsumer{
 		store:    s,
 		consumer: consumer,
 		logger:   slog.Default(),
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c, nil
 }
 
-func (c *ConfigConsumer) processConfigMessage(ctx context.Context, msg jetstream.Msg) error {
-	var cfgEvent eventsv1.ConfigChanged
-	if err := protojson.Unmarshal(msg.Data(), &cfgEvent); err != nil {
-		c.logger.ErrorContext(ctx, "failed to unmarshal ConfigChanged event", slog.Any("error", err))
-		return err
-	}
-
-	for _, kl := range cfgEvent.KeyLimits {
+func (c *ConfigConsumer) applyKeyLimits(ctx context.Context, keyLimits []*eventsv1.KeyLimit) error {
+	for _, kl := range keyLimits {
 		limits := core.KeyLimits{
 			KeyID:              kl.KeyId,
-			DailyLimitMicros:   kl.DailyLimitMicros,
-			MonthlyLimitMicros: kl.MonthlyLimitMicros,
+			DailyLimitMicros:   money.Micros(kl.DailyLimitMicros),
+			MonthlyLimitMicros: money.Micros(kl.MonthlyLimitMicros),
 			RPM:                kl.Rpm,
 		}
 		if err := c.store.SetKeyLimits(ctx, limits); err != nil {
@@ -168,15 +178,22 @@ func (c *ConfigConsumer) processConfigMessage(ctx context.Context, msg jetstream
 			return err
 		}
 	}
-
 	return nil
 }
 
 func (c *ConfigConsumer) Start(ctx context.Context) (jetstream.ConsumeContext, error) {
 	return c.consumer.Consume(func(msg jetstream.Msg) {
 		msgCtx := natsx.ExtractTraceContext(ctx, msg)
-		if err := c.processConfigMessage(msgCtx, msg); err != nil {
-			_ = msg.Nak()
+		var cfgEvent eventsv1.ConfigChanged
+		if err := protojson.Unmarshal(msg.Data(), &cfgEvent); err != nil {
+			c.logger.ErrorContext(msgCtx, "malformed config event, terminating poison pill", slog.Any("error", err))
+			_ = msg.Term()
+			return
+		}
+
+		if err := c.applyKeyLimits(msgCtx, cfgEvent.KeyLimits); err != nil {
+			c.logger.ErrorContext(msgCtx, "transient store error, backing off", slog.Any("error", err))
+			_ = msg.NakWithDelay(1 * time.Second)
 			return
 		}
 		_ = msg.Ack()

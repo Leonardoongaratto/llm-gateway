@@ -112,7 +112,6 @@ func TestGRPC_Reserve_ErrorMappings(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			mock := &mockStore{
 				reserveFunc: func(_ context.Context, _ store.ReserveParams) (*store.ReserveResult, error) {
@@ -139,13 +138,11 @@ func TestGRPC_Reserve_ErrorMappings(t *testing.T) {
 func TestGRPC_Reserve_InvalidArguments(t *testing.T) {
 	client := setupTestServer(t, &mockStore{})
 
-	// Empty KeyId
 	_, err := client.Reserve(context.Background(), &budgetv1.ReserveRequest{KeyId: "", MaxMicros: 100})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Errorf("expected InvalidArgument for empty KeyId, got %v", err)
 	}
 
-	// Zero MaxMicros
 	_, err = client.Reserve(context.Background(), &budgetv1.ReserveRequest{KeyId: "k-1", MaxMicros: 0})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Errorf("expected InvalidArgument for zero MaxMicros, got %v", err)
@@ -172,31 +169,26 @@ func TestGRPC_Settle_And_Release(t *testing.T) {
 	}
 	client := setupTestServer(t, mock)
 
-	// Settle success
 	_, err := client.Settle(context.Background(), &budgetv1.SettleRequest{ReservationId: "res-1", ActualMicros: 100})
 	if err != nil {
 		t.Fatalf("expected settle success, got %v", err)
 	}
 
-	// Settle not found
 	_, err = client.Settle(context.Background(), &budgetv1.SettleRequest{ReservationId: "not-found", ActualMicros: 100})
 	if status.Code(err) != codes.NotFound {
 		t.Errorf("expected NotFound code, got %v", err)
 	}
 
-	// Settle closed
 	_, err = client.Settle(context.Background(), &budgetv1.SettleRequest{ReservationId: "closed", ActualMicros: 100})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Errorf("expected FailedPrecondition code, got %v", err)
 	}
 
-	// Release success
 	_, err = client.Release(context.Background(), &budgetv1.ReleaseRequest{ReservationId: "res-1"})
 	if err != nil {
 		t.Fatalf("expected release success, got %v", err)
 	}
 
-	// Release not found
 	_, err = client.Release(context.Background(), &budgetv1.ReleaseRequest{ReservationId: "not-found"})
 	if status.Code(err) != codes.NotFound {
 		t.Errorf("expected NotFound code for release, got %v", err)
@@ -211,6 +203,8 @@ func TestGRPC_Remaining(t *testing.T) {
 			}
 			return &store.RemainingInfo{
 				KeyID:               keyID,
+				DailyLimitMicros:    5000,
+				MonthlyLimitMicros:  50000,
 				DailySpentMicros:    1200,
 				DailyReservedMicros: 300,
 				MonthlySpentMicros:  5000,
@@ -223,17 +217,18 @@ func TestGRPC_Remaining(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected remaining success, got %v", err)
 	}
-	if resp.DailyMicros != 1500 {
-		t.Errorf("expected daily micros 1500, got %d", resp.DailyMicros)
+	if resp.DailyMicros != 3500 {
+		t.Errorf("expected daily micros 3500, got %d", resp.DailyMicros)
+	}
+	if resp.MonthlyMicros != 45000 {
+		t.Errorf("expected monthly micros 45000, got %d", resp.MonthlyMicros)
 	}
 
-	// Invalid empty key
 	_, err = client.Remaining(context.Background(), &budgetv1.RemainingRequest{KeyId: ""})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Errorf("expected InvalidArgument for empty key, got %v", err)
 	}
 
-	// Not found key
 	_, err = client.Remaining(context.Background(), &budgetv1.RemainingRequest{KeyId: "not-found"})
 	if status.Code(err) != codes.NotFound {
 		t.Errorf("expected NotFound for unknown key, got %v", err)

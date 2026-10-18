@@ -48,8 +48,9 @@ func New(expirer Expirer, opts ...Option) *Sweeper {
 
 func (s *Sweeper) SweepOnce(ctx context.Context, now time.Time) (int, error) {
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = time.Now()
 	}
+	now = now.UTC()
 	count, err := s.expirer.ExpireReservations(ctx, now)
 	if err != nil {
 		s.logger.ErrorContext(ctx, "failed to expire reservations", slog.Any("error", err))
@@ -70,7 +71,7 @@ func (s *Sweeper) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case t := <-ticker.C:
-			_, _ = s.SweepOnce(ctx, t)
+			_, _ = s.SweepOnce(ctx, t.UTC())
 		}
 	}
 }

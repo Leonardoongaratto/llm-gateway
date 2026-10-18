@@ -69,7 +69,6 @@ func TestAC1B07_OutboxRelay_PublishesAndMarks(t *testing.T) {
 		t.Fatalf("reserve failed: %v", err)
 	}
 
-	// Settle 8500 -> enqueues 80% threshold into outbox
 	if _, err := s.Settle(ctx, res.ReservationID, 8500, now); err != nil {
 		t.Fatalf("settle failed: %v", err)
 	}
@@ -99,7 +98,7 @@ func TestAC1B09_ConfigConsumer_UpdatesLimits(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	consumer, err := outbox.NewConfigConsumer(s, js)
+	consumer, err := outbox.NewConfigConsumer(s, js, outbox.WithConsumerLogger(nil))
 	if err != nil {
 		t.Fatalf("failed to create config consumer: %v", err)
 	}
@@ -110,7 +109,6 @@ func TestAC1B09_ConfigConsumer_UpdatesLimits(t *testing.T) {
 	}
 	defer consumeCtx.Stop()
 
-	// Publish ConfigChanged event on lgw.config.changed.v1
 	cfgEvent := &eventsv1.ConfigChanged{
 		Kind:    eventsv1.ConfigChanged_KEY,
 		Version: 1,
@@ -133,7 +131,6 @@ func TestAC1B09_ConfigConsumer_UpdatesLimits(t *testing.T) {
 		t.Fatalf("failed to publish config changed event: %v", err)
 	}
 
-	// Verify local store updated within 2 seconds (AC-1B-09)
 	var updated bool
 	for attempt := 0; attempt < 40; attempt++ {
 		time.Sleep(50 * time.Millisecond)
@@ -147,6 +144,30 @@ func TestAC1B09_ConfigConsumer_UpdatesLimits(t *testing.T) {
 	if !updated {
 		t.Fatal("config consumer failed to update key limits within 2 seconds")
 	}
+}
+
+func TestConfigConsumer_MalformedPayload_Terminated(t *testing.T) {
+	s, js := setupTestEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	consumer, err := outbox.NewConfigConsumer(s, js)
+	if err != nil {
+		t.Fatalf("failed to create config consumer: %v", err)
+	}
+
+	consumeCtx, err := consumer.Start(ctx)
+	if err != nil {
+		t.Fatalf("failed to start config consumer: %v", err)
+	}
+	defer consumeCtx.Stop()
+
+	_, err = natsx.Publish(ctx, js, "lgw.config.changed.v1", []byte("invalid-non-json-payload"), "poison-1")
+	if err != nil {
+		t.Fatalf("failed to publish poison pill: %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
 }
 
 func TestRelay_Run_GracefulShutdownAndOptions(t *testing.T) {

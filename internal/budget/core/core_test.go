@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Leonardoongaratto/llm-gateway/internal/budget/core"
+	"github.com/Leonardoongaratto/llm-gateway/internal/kernel/money"
 )
 
 func TestPeriods_Formatting(t *testing.T) {
@@ -29,8 +30,8 @@ func TestDaysInMonth(t *testing.T) {
 		month    time.Month
 		expected int
 	}{
-		{2024, time.February, 29}, // leap year
-		{2025, time.February, 28}, // non-leap year
+		{2024, time.February, 29},
+		{2025, time.February, 28},
 		{2026, time.January, 31},
 		{2026, time.April, 30},
 		{2026, time.October, 31},
@@ -47,9 +48,9 @@ func TestDaysInMonth(t *testing.T) {
 func TestProjectedMonthlySpend_Normal(t *testing.T) {
 	cases := []struct {
 		name     string
-		spent    int64
+		spent    money.Micros
 		ts       time.Time
-		expected int64
+		expected money.Micros
 	}{
 		{
 			name:     "mid month projection in 30-day month",
@@ -72,7 +73,6 @@ func TestProjectedMonthlySpend_Normal(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			proj, err := core.ProjectedMonthlySpend(tc.spent, tc.ts)
 			if err != nil {
@@ -88,11 +88,11 @@ func TestProjectedMonthlySpend_Normal(t *testing.T) {
 func TestProjectedMonthlySpend_Errors(t *testing.T) {
 	ts := time.Date(2026, time.January, 10, 0, 0, 0, 0, time.UTC)
 
-	if _, err := core.ProjectedMonthlySpend(-10, ts); err == nil {
+	if _, err := core.ProjectedMonthlySpend(money.Micros(-10), ts); err == nil {
 		t.Fatal("expected error for negative spend, got nil")
 	}
 
-	if _, err := core.ProjectedMonthlySpend(math.MaxInt64/2, ts); err == nil {
+	if _, err := core.ProjectedMonthlySpend(money.Micros(math.MaxInt64/2), ts); err == nil {
 		t.Fatal("expected overflow error, got nil")
 	}
 }
@@ -142,7 +142,6 @@ func TestSlidingWindowRateLimiter(t *testing.T) {
 	rl := core.NewSlidingWindowRateLimiter()
 	now := time.Now()
 
-	// RPM = 3
 	for i := 0; i < 3; i++ {
 		allowed, retryAfter := rl.Allow("key-1", 3, now.Add(time.Duration(i)*time.Second))
 		if !allowed {
@@ -153,7 +152,6 @@ func TestSlidingWindowRateLimiter(t *testing.T) {
 		}
 	}
 
-	// 4th call within same minute should be rejected
 	allowed, retryAfter := rl.Allow("key-1", 3, now.Add(10*time.Second))
 	if allowed {
 		t.Fatal("4th call should be rate limited")
@@ -162,13 +160,11 @@ func TestSlidingWindowRateLimiter(t *testing.T) {
 		t.Errorf("expected positive retryAfter, got %v", retryAfter)
 	}
 
-	// Another key with same limiter should not be affected
 	allowedOther, _ := rl.Allow("key-2", 3, now.Add(10*time.Second))
 	if !allowedOther {
 		t.Fatal("different key should not be rate limited")
 	}
 
-	// After 61 seconds, oldest calls expired, call should be allowed
 	allowedAfter, _ := rl.Allow("key-1", 3, now.Add(62*time.Second))
 	if !allowedAfter {
 		t.Fatal("call after 62s should be allowed after old calls expired")

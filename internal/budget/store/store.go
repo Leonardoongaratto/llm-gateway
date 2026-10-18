@@ -13,6 +13,7 @@ import (
 	eventsv1 "github.com/Leonardoongaratto/llm-gateway/gen/lgw/events/v1"
 	"github.com/Leonardoongaratto/llm-gateway/internal/budget/core"
 	"github.com/Leonardoongaratto/llm-gateway/internal/kernel/ids"
+	"github.com/Leonardoongaratto/llm-gateway/internal/kernel/money"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/sqlx"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -41,6 +42,10 @@ func New(db *sql.DB) *Store {
 		isSQLite:    isSQLite,
 		rateLimiter: core.NewSlidingWindowRateLimiter(),
 	}
+}
+
+func (s *Store) DB() *sql.DB {
+	return s.db
 }
 
 type ReserveParams struct {
@@ -109,9 +114,9 @@ ON CONFLICT (key_id) DO UPDATE SET
 	return nil
 }
 
-func (s *Store) queryKeyLimits(ctx context.Context, tx *sql.Tx, keyID string) (*core.KeyLimits, error) {
+func (s *Store) queryKeyLimits(ctx context.Context, tx *sql.Tx, keyID string, forUpdate bool) (*core.KeyLimits, error) {
 	query := `SELECT daily_limit_micros, monthly_limit_micros, rpm FROM key_limits WHERE key_id = $1`
-	if !s.isSQLite {
+	if !s.isSQLite && forUpdate {
 		query += " FOR UPDATE"
 	}
 
@@ -126,15 +131,15 @@ func (s *Store) queryKeyLimits(ctx context.Context, tx *sql.Tx, keyID string) (*
 	}
 	return &core.KeyLimits{
 		KeyID:              keyID,
-		DailyLimitMicros:   daily,
-		MonthlyLimitMicros: monthly,
+		DailyLimitMicros:   money.Micros(daily),
+		MonthlyLimitMicros: money.Micros(monthly),
 		RPM:                rpm,
 	}, nil
 }
 
-func (s *Store) queryPeriodBalances(ctx context.Context, tx *sql.Tx, keyID, period string) (spent, reserved int64, err error) {
+func (s *Store) queryPeriodBalances(ctx context.Context, tx *sql.Tx, keyID, period string, forUpdate bool) (spent, reserved int64, err error) {
 	query := `SELECT spent_micros, reserved_micros FROM budget_periods WHERE key_id = $1 AND period = $2`
-	if !s.isSQLite {
+	if !s.isSQLite && forUpdate {
 		query += " FOR UPDATE"
 	}
 	row := tx.QueryRowContext(ctx, query, keyID, period)
@@ -173,28 +178,28 @@ VALUES ($1, $2, $3, $4, $5, 0, 'reserved', $6, $7, $8);
 }
 
 func (s *Store) checkBalancesAndReserve(ctx context.Context, tx *sql.Tx, limits core.KeyLimits, keyID, dayPeriod, monthPeriod string, maxMicros int64) (remDaily, remMonthly int64, err error) {
-	daySpent, dayReserved, err := s.queryPeriodBalances(ctx, tx, keyID, dayPeriod)
+	daySpent, dayReserved, err := s.queryPeriodBalances(ctx, tx, keyID, dayPeriod, true)
 	if err != nil {
 		return 0, 0, err
 	}
-	monthSpent, monthReserved, err := s.queryPeriodBalances(ctx, tx, keyID, monthPeriod)
+	monthSpent, monthReserved, err := s.queryPeriodBalances(ctx, tx, keyID, monthPeriod, true)
 	if err != nil {
 		return 0, 0, err
 	}
 
-	if err := core.CheckLimits(limits, daySpent, dayReserved, monthSpent, monthReserved, maxMicros); err != nil {
+	if err := core.CheckLimits(limits, money.Micros(daySpent), money.Micros(dayReserved), money.Micros(monthSpent), money.Micros(monthReserved), money.Micros(maxMicros)); err != nil {
 		return 0, 0, err
 	}
 
-	if err := s.upsertReservedPeriod(ctx, tx, keyID, dayPeriod, "day", maxMicros, limits.DailyLimitMicros); err != nil {
+	if err := s.upsertReservedPeriod(ctx, tx, keyID, dayPeriod, "day", maxMicros, int64(limits.DailyLimitMicros)); err != nil {
 		return 0, 0, err
 	}
-	if err := s.upsertReservedPeriod(ctx, tx, keyID, monthPeriod, "month", maxMicros, limits.MonthlyLimitMicros); err != nil {
+	if err := s.upsertReservedPeriod(ctx, tx, keyID, monthPeriod, "month", maxMicros, int64(limits.MonthlyLimitMicros)); err != nil {
 		return 0, 0, err
 	}
 
-	remDaily = limits.DailyLimitMicros - (daySpent + dayReserved + maxMicros)
-	remMonthly = limits.MonthlyLimitMicros - (monthSpent + monthReserved + maxMicros)
+	remDaily = int64(limits.DailyLimitMicros) - (daySpent + dayReserved + maxMicros)
+	remMonthly = int64(limits.MonthlyLimitMicros) - (monthSpent + monthReserved + maxMicros)
 	return remDaily, remMonthly, nil
 }
 
@@ -205,8 +210,9 @@ func (s *Store) Reserve(ctx context.Context, params ReserveParams) (*ReserveResu
 	}
 
 	if params.Now.IsZero() {
-		params.Now = time.Now().UTC()
+		params.Now = time.Now()
 	}
+	params.Now = params.Now.UTC()
 	if params.TTL <= 0 {
 		params.TTL = 15 * time.Minute
 	}
@@ -220,7 +226,7 @@ func (s *Store) Reserve(ctx context.Context, params ReserveParams) (*ReserveResu
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	limits, err := s.queryKeyLimits(ctx, tx, params.KeyID)
+	limits, err := s.queryKeyLimits(ctx, tx, params.KeyID, true)
 	if err != nil {
 		return nil, err
 	}
@@ -277,24 +283,25 @@ func (s *Store) queryReservation(ctx context.Context, tx *sql.Tx, reservationID 
 	return &rec, nil
 }
 
-func (s *Store) settlePeriod(ctx context.Context, tx *sql.Tx, keyID, period string, maxMicros, actualMicros int64) (spentBefore, limit int64, err error) {
-	query := `SELECT spent_micros, limit_micros FROM budget_periods WHERE key_id = $1 AND period = $2`
+func (s *Store) settlePeriod(ctx context.Context, tx *sql.Tx, keyID, period string, maxMicros, actualMicros, currentLimit int64) (spentBefore int64, err error) {
+	query := `SELECT spent_micros FROM budget_periods WHERE key_id = $1 AND period = $2`
 	if !s.isSQLite {
 		query += " FOR UPDATE"
 	}
 	row := tx.QueryRowContext(ctx, query, keyID, period)
-	if err := row.Scan(&spentBefore, &limit); err != nil {
-		return 0, 0, err
+	if err := row.Scan(&spentBefore); err != nil {
+		return 0, err
 	}
 
 	updateQuery := `
 UPDATE budget_periods
 SET reserved_micros = reserved_micros - $1,
-    spent_micros = spent_micros + $2
-WHERE key_id = $3 AND period = $4;
+    spent_micros = spent_micros + $2,
+    limit_micros = $3
+WHERE key_id = $4 AND period = $5;
 `
-	_, err = tx.ExecContext(ctx, updateQuery, maxMicros, actualMicros, keyID, period)
-	return spentBefore, limit, err
+	_, err = tx.ExecContext(ctx, updateQuery, maxMicros, actualMicros, currentLimit, keyID, period)
+	return spentBefore, err
 }
 
 func (s *Store) checkThreshold(ctx context.Context, tx *sql.Tx, keyID, period string, limit, spentBefore, actual int64, now time.Time) error {
@@ -322,7 +329,7 @@ func (s *Store) checkThreshold(ctx context.Context, tx *sql.Tx, keyID, period st
 			LimitMicros: limit,
 			OccurredAt:  timestamppb.New(now),
 		}
-		payloadBytes, err := protojson.Marshal(evt)
+		payloadBytes, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(evt)
 		if err != nil {
 			return err
 		}
@@ -345,8 +352,9 @@ func (s *Store) Settle(ctx context.Context, reservationID string, actualMicros i
 	}
 
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = time.Now()
 	}
+	now = now.UTC()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -366,24 +374,29 @@ func (s *Store) Settle(ctx context.Context, reservationID string, actualMicros i
 		return nil, core.ErrReservationClosed
 	}
 
+	limits, err := s.queryKeyLimits(ctx, tx, rec.KeyID, true)
+	if err != nil {
+		return nil, err
+	}
+
 	updateRes := `UPDATE reservations SET state = 'settled', actual_micros = $1, updated_at = $2 WHERE id = $3;`
 	if _, err := tx.ExecContext(ctx, updateRes, actualMicros, now, reservationID); err != nil {
 		return nil, err
 	}
 
-	daySpentBefore, dayLimit, err := s.settlePeriod(ctx, tx, rec.KeyID, rec.DayPeriod, rec.MaxMicros, actualMicros)
+	daySpentBefore, err := s.settlePeriod(ctx, tx, rec.KeyID, rec.DayPeriod, rec.MaxMicros, actualMicros, int64(limits.DailyLimitMicros))
 	if err != nil {
 		return nil, err
 	}
-	monthSpentBefore, monthLimit, err := s.settlePeriod(ctx, tx, rec.KeyID, rec.MonthPeriod, rec.MaxMicros, actualMicros)
+	monthSpentBefore, err := s.settlePeriod(ctx, tx, rec.KeyID, rec.MonthPeriod, rec.MaxMicros, actualMicros, int64(limits.MonthlyLimitMicros))
 	if err != nil {
 		return nil, err
 	}
 
-	if err := s.checkThreshold(ctx, tx, rec.KeyID, "day", dayLimit, daySpentBefore, actualMicros, now); err != nil {
+	if err := s.checkThreshold(ctx, tx, rec.KeyID, "day", int64(limits.DailyLimitMicros), daySpentBefore, actualMicros, now); err != nil {
 		return nil, err
 	}
-	if err := s.checkThreshold(ctx, tx, rec.KeyID, "month", monthLimit, monthSpentBefore, actualMicros, now); err != nil {
+	if err := s.checkThreshold(ctx, tx, rec.KeyID, "month", int64(limits.MonthlyLimitMicros), monthSpentBefore, actualMicros, now); err != nil {
 		return nil, err
 	}
 
@@ -401,8 +414,9 @@ func (s *Store) Release(ctx context.Context, reservationID string, now time.Time
 	}
 
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = time.Now()
 	}
+	now = now.UTC()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -486,8 +500,9 @@ func (s *Store) ExpireReservations(ctx context.Context, now time.Time) (int, err
 	}
 
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = time.Now()
 	}
+	now = now.UTC()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -519,8 +534,9 @@ func (s *Store) Remaining(ctx context.Context, keyID string, now time.Time) (*Re
 	}
 
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = time.Now()
 	}
+	now = now.UTC()
 
 	dayPeriod := core.DayPeriod(now)
 	monthPeriod := core.MonthPeriod(now)
@@ -531,24 +547,24 @@ func (s *Store) Remaining(ctx context.Context, keyID string, now time.Time) (*Re
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	limits, err := s.queryKeyLimits(ctx, tx, keyID)
+	limits, err := s.queryKeyLimits(ctx, tx, keyID, false)
 	if err != nil {
 		return nil, err
 	}
 
-	daySpent, dayReserved, err := s.queryPeriodBalances(ctx, tx, keyID, dayPeriod)
+	daySpent, dayReserved, err := s.queryPeriodBalances(ctx, tx, keyID, dayPeriod, false)
 	if err != nil {
 		return nil, err
 	}
-	monthSpent, monthReserved, err := s.queryPeriodBalances(ctx, tx, keyID, monthPeriod)
+	monthSpent, monthReserved, err := s.queryPeriodBalances(ctx, tx, keyID, monthPeriod, false)
 	if err != nil {
 		return nil, err
 	}
 
 	return &RemainingInfo{
 		KeyID:                 keyID,
-		DailyLimitMicros:      limits.DailyLimitMicros,
-		MonthlyLimitMicros:    limits.MonthlyLimitMicros,
+		DailyLimitMicros:      int64(limits.DailyLimitMicros),
+		MonthlyLimitMicros:    int64(limits.MonthlyLimitMicros),
 		DailySpentMicros:      daySpent,
 		DailyReservedMicros:   dayReserved,
 		MonthlySpentMicros:    monthSpent,
@@ -566,7 +582,7 @@ func (s *Store) FetchPendingOutbox(ctx context.Context, limit int) ([]OutboxMess
 		limit = 50
 	}
 
-	query := `SELECT id, subject, payload, created_at FROM outbox WHERE published_at IS NULL ORDER BY created_at ASC LIMIT $1;`
+	query := `SELECT id, subject, payload, created_at FROM outbox WHERE published_at IS NULL ORDER BY created_at ASC, id ASC LIMIT $1;`
 	rows, err := s.db.QueryContext(ctx, query, limit)
 	if err != nil {
 		return nil, err

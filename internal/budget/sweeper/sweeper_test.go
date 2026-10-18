@@ -45,6 +45,25 @@ func TestSweeper_SweepOnce(t *testing.T) {
 		}
 	})
 
+	t.Run("converts non-UTC timezone to UTC", func(t *testing.T) {
+		var receivedLoc *time.Location
+		mock := &mockExpirer{
+			expireFunc: func(_ context.Context, now time.Time) (int, error) {
+				receivedLoc = now.Location()
+				return 1, nil
+			},
+		}
+		sw := sweeper.New(mock)
+		nonUTC := time.Now().In(time.FixedZone("UTC-3", -3*3600))
+		_, err := sw.SweepOnce(context.Background(), nonUTC)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if receivedLoc != time.UTC {
+			t.Errorf("expected time passed to expirer to be in UTC, got: %v", receivedLoc)
+		}
+	})
+
 	t.Run("error", func(t *testing.T) {
 		mock := &mockExpirer{
 			expireFunc: func(_ context.Context, _ time.Time) (int, error) {

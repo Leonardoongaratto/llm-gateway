@@ -6,6 +6,8 @@ import (
 	"math"
 	"sync"
 	"time"
+
+	"github.com/Leonardoongaratto/llm-gateway/internal/kernel/money"
 )
 
 var (
@@ -19,8 +21,8 @@ var (
 
 type KeyLimits struct {
 	KeyID              string
-	DailyLimitMicros   int64
-	MonthlyLimitMicros int64
+	DailyLimitMicros   money.Micros
+	MonthlyLimitMicros money.Micros
 	RPM                int32
 }
 
@@ -37,7 +39,7 @@ func DaysInMonth(t time.Time) int {
 	return time.Date(utc.Year(), utc.Month()+1, 0, 0, 0, 0, 0, time.UTC).Day()
 }
 
-func ProjectedMonthlySpend(spentSoFar int64, now time.Time) (int64, error) {
+func ProjectedMonthlySpend(spentSoFar money.Micros, now time.Time) (money.Micros, error) {
 	if spentSoFar < 0 {
 		return 0, ErrNegativeAmount
 	}
@@ -51,15 +53,15 @@ func ProjectedMonthlySpend(spentSoFar int64, now time.Time) (int64, error) {
 		daysElapsed = 1
 	}
 
-	if spentSoFar > math.MaxInt64/daysTotal {
+	if int64(spentSoFar) > math.MaxInt64/daysTotal {
 		return 0, ErrOverflow
 	}
 
-	projected := (spentSoFar * daysTotal) / daysElapsed
-	return projected, nil
+	projected := (int64(spentSoFar) * daysTotal) / daysElapsed
+	return money.Micros(projected), nil
 }
 
-func CheckLimits(limits KeyLimits, currentDailySpend, currentDailyReserved, currentMonthlySpend, currentMonthlyReserved, requestedMicros int64) error {
+func CheckLimits(limits KeyLimits, currentDailySpend, currentDailyReserved, currentMonthlySpend, currentMonthlyReserved, requestedMicros money.Micros) error {
 	if requestedMicros < 0 {
 		return fmt.Errorf("%w: requested micros %d", ErrNegativeAmount, requestedMicros)
 	}

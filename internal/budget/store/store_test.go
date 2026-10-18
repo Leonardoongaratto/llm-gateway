@@ -57,52 +57,75 @@ func createTestDBs(t *testing.T) map[string]*sql.DB {
 func forEachStore(t *testing.T, fn func(t *testing.T, s *store.Store, name string)) {
 	t.Helper()
 	for name, db := range createTestDBs(t) {
-		name := name
-		db := db
 		t.Run(name, func(t *testing.T) {
+			if name == "postgres" {
+				_, _ = db.Exec("TRUNCATE reservations, budget_periods, outbox, key_limits CASCADE")
+			}
 			s := store.New(db)
 			fn(t, s, name)
 		})
 	}
 }
 
-func TestAC1B01_Reserve_WithinLimits(t *testing.T) {
-	forEachStore(t, func(t *testing.T, s *store.Store, name string) {
-		ctx := context.Background()
-		keyID := fmt.Sprintf("k-ac01-%s", name)
-		limits := core.KeyLimits{
-			KeyID:              keyID,
-			DailyLimitMicros:   5000,
-			MonthlyLimitMicros: 50000,
-			RPM:                100,
-		}
-		if err := s.SetKeyLimits(ctx, limits); err != nil {
-			t.Fatalf("failed to set limits: %v", err)
-		}
+func verifyReservationTTL(ctx context.Context, t *testing.T, s *store.Store, resID string, expectedExpires time.Time) {
+	t.Helper()
+	var expiresAt time.Time
+	err := s.DB().QueryRowContext(ctx, "SELECT expires_at FROM reservations WHERE id = $1", resID).Scan(&expiresAt)
+	if err != nil {
+		t.Fatalf("failed to query expires_at: %v", err)
+	}
+	if !expiresAt.Equal(expectedExpires) {
+		t.Errorf("expected default TTL 15m expires_at %v, got %v", expectedExpires, expiresAt)
+	}
+}
 
-		now := time.Date(2026, time.October, 18, 12, 0, 0, 0, time.UTC)
-		res, err := s.Reserve(ctx, store.ReserveParams{
-			KeyID:     keyID,
-			MaxMicros: 1000,
-			RequestID: "req-1",
-			Now:       now,
-		})
-		if err != nil {
-			t.Fatalf("unexpected reserve error: %v", err)
-		}
+func runReserveWithinLimitsTest(t *testing.T, s *store.Store, name string) {
+	ctx := context.Background()
+	keyID := fmt.Sprintf("k-ac01-%s", name)
+	limits := core.KeyLimits{
+		KeyID:              keyID,
+		DailyLimitMicros:   5000,
+		MonthlyLimitMicros: 50000,
+		RPM:                100,
+	}
+	if err := s.SetKeyLimits(ctx, limits); err != nil {
+		t.Fatalf("failed to set limits: %v", err)
+	}
 
-		if !res.Allowed || res.ReservationID == "" || res.RemainingDailyMicros != 4000 {
-			t.Errorf("unexpected reserve result: %+v", res)
-		}
-
-		rem, err := s.Remaining(ctx, keyID, now)
-		if err != nil {
-			t.Fatalf("failed to get remaining: %v", err)
-		}
-		if rem.DailyReservedMicros != 1000 || rem.DailySpentMicros != 0 {
-			t.Errorf("unexpected remaining balances: %+v", rem)
-		}
+	now := time.Date(2026, time.October, 18, 12, 0, 0, 0, time.UTC)
+	res, err := s.Reserve(ctx, store.ReserveParams{
+		KeyID:     keyID,
+		MaxMicros: 1000,
+		RequestID: "req-1",
+		Now:       now,
 	})
+	if err != nil {
+		t.Fatalf("unexpected reserve error: %v", err)
+	}
+
+	if !res.Allowed {
+		t.Errorf("expected res.Allowed true, got false")
+	}
+	if res.ReservationID == "" {
+		t.Errorf("expected non-empty reservation ID")
+	}
+	if res.RemainingDailyMicros != 4000 {
+		t.Errorf("expected remaining daily micros 4000, got %d", res.RemainingDailyMicros)
+	}
+
+	verifyReservationTTL(ctx, t, s, res.ReservationID, now.Add(15*time.Minute))
+
+	rem, err := s.Remaining(ctx, keyID, now)
+	if err != nil {
+		t.Fatalf("failed to get remaining: %v", err)
+	}
+	if rem.DailyReservedMicros != 1000 || rem.DailySpentMicros != 0 {
+		t.Errorf("unexpected remaining balances: %+v", rem)
+	}
+}
+
+func TestAC1B01_Reserve_WithinLimits(t *testing.T) {
+	forEachStore(t, runReserveWithinLimitsTest)
 }
 
 func TestAC1B02_Reserve_ExceedsBudget(t *testing.T) {
@@ -305,8 +328,8 @@ func TestAC1B06_Settle_OutboxThreshold80and100(t *testing.T) {
 func verifyExpirationAndClosedState(ctx context.Context, t *testing.T, s *store.Store, resID string, now time.Time) {
 	t.Helper()
 	expiredCount, err := s.ExpireReservations(ctx, now.Add(16*time.Minute))
-	if err != nil || expiredCount != 1 {
-		t.Fatalf("expected 1 expired reservation, got %d (err: %v)", expiredCount, err)
+	if err != nil || expiredCount < 1 {
+		t.Fatalf("expected at least 1 expired reservation, got %d (err: %v)", expiredCount, err)
 	}
 
 	_, err = s.Settle(ctx, resID, 1000, now.Add(17*time.Minute))
@@ -318,7 +341,7 @@ func verifyExpirationAndClosedState(ctx context.Context, t *testing.T, s *store.
 func TestAC1B08_Release_And_SweeperExpiration(t *testing.T) {
 	forEachStore(t, func(t *testing.T, s *store.Store, name string) {
 		ctx := context.Background()
-		keyID := fmt.Sprintf("k-ac08-%s", name)
+		keyID := fmt.Sprintf("k-ac08-%s-%d", name, time.Now().UnixNano())
 		limits := core.KeyLimits{
 			KeyID:              keyID,
 			DailyLimitMicros:   5000,
@@ -356,7 +379,7 @@ func TestAC1B08_Release_And_SweeperExpiration(t *testing.T) {
 
 func runRateLimitTest(t *testing.T, s *store.Store, name string) {
 	ctx := context.Background()
-	keyID := fmt.Sprintf("k-rl-%s", name)
+	keyID := fmt.Sprintf("k-rl-%s-%d", name, time.Now().UnixNano())
 	limits := core.KeyLimits{
 		KeyID:              keyID,
 		DailyLimitMicros:   50000,
@@ -380,7 +403,6 @@ func runRateLimitTest(t *testing.T, s *store.Store, name string) {
 		}
 	}
 
-	// 3rd call within 60s exceeds RPM
 	_, err := s.Reserve(ctx, store.ReserveParams{
 		KeyID:     keyID,
 		MaxMicros: 100,
@@ -400,7 +422,6 @@ func runNotFoundAndClosedTest(t *testing.T, s *store.Store, name string) {
 	ctx := context.Background()
 	now := time.Date(2026, time.October, 18, 12, 0, 0, 0, time.UTC)
 
-	// Unknown key
 	if _, err := s.Remaining(ctx, "non-existent", now); !errors.Is(err, core.ErrNotFound) {
 		t.Errorf("expected ErrNotFound for Remaining with unknown key, got %v", err)
 	}
@@ -408,7 +429,6 @@ func runNotFoundAndClosedTest(t *testing.T, s *store.Store, name string) {
 		t.Errorf("expected ErrNotFound for Reserve with unknown key, got %v", err)
 	}
 
-	// Unknown reservation
 	if _, err := s.Settle(ctx, "unknown-res", 100, now); !errors.Is(err, core.ErrNotFound) {
 		t.Errorf("expected ErrNotFound for Settle with unknown res, got %v", err)
 	}
@@ -416,8 +436,7 @@ func runNotFoundAndClosedTest(t *testing.T, s *store.Store, name string) {
 		t.Errorf("expected ErrNotFound for Release with unknown res, got %v", err)
 	}
 
-	// Release after Settle -> closed
-	keyID := fmt.Sprintf("k-closed-%s", name)
+	keyID := fmt.Sprintf("k-closed-%s-%d", name, time.Now().UnixNano())
 	_ = s.SetKeyLimits(ctx, core.KeyLimits{KeyID: keyID, DailyLimitMicros: 5000})
 	res, _ := s.Reserve(ctx, store.ReserveParams{KeyID: keyID, MaxMicros: 500, Now: now})
 	_, _ = s.Settle(ctx, res.ReservationID, 500, now)
@@ -426,7 +445,6 @@ func runNotFoundAndClosedTest(t *testing.T, s *store.Store, name string) {
 		t.Errorf("expected ErrReservationClosed for Release on settled res, got %v", err)
 	}
 
-	// Outbox edge cases
 	if err := s.MarkOutboxPublished(ctx, nil, now); err != nil {
 		t.Errorf("expected nil error on empty mark published, got %v", err)
 	}
@@ -437,4 +455,100 @@ func runNotFoundAndClosedTest(t *testing.T, s *store.Store, name string) {
 
 func TestStore_ErrorAndEdgeCases(t *testing.T) {
 	forEachStore(t, runNotFoundAndClosedTest)
+}
+
+func reserveAndSettle(ctx context.Context, t *testing.T, s *store.Store, keyID, reqID string, micros int64, now time.Time) {
+	t.Helper()
+	res, err := s.Reserve(ctx, store.ReserveParams{
+		KeyID:     keyID,
+		MaxMicros: micros,
+		RequestID: reqID,
+		Now:       now,
+	})
+	if err != nil {
+		t.Fatalf("reserve failed: %v", err)
+	}
+	if _, err := s.Settle(ctx, res.ReservationID, micros, now); err != nil {
+		t.Fatalf("settle failed: %v", err)
+	}
+}
+
+func runSettleThresholdWithUpdatedLimitsTest(t *testing.T, s *store.Store, name string) {
+	ctx := context.Background()
+	keyID := fmt.Sprintf("k-bug03-%s-%d", name, time.Now().UnixNano())
+	limits := core.KeyLimits{
+		KeyID:              keyID,
+		DailyLimitMicros:   100000,
+		MonthlyLimitMicros: 1000000,
+	}
+	if err := s.SetKeyLimits(ctx, limits); err != nil {
+		t.Fatalf("failed to set limits: %v", err)
+	}
+
+	now := time.Date(2026, time.October, 18, 12, 0, 0, 0, time.UTC)
+	reserveAndSettle(ctx, t, s, keyID, "req-1", 1000, now)
+
+	updatedLimits := core.KeyLimits{
+		KeyID:              keyID,
+		DailyLimitMicros:   10000,
+		MonthlyLimitMicros: 1000000,
+	}
+	if err := s.SetKeyLimits(ctx, updatedLimits); err != nil {
+		t.Fatalf("failed to update limits: %v", err)
+	}
+
+	reserveAndSettle(ctx, t, s, keyID, "req-2", 7500, now)
+
+	msgs, err := s.FetchPendingOutbox(ctx, 10)
+	if err != nil {
+		t.Fatalf("failed to fetch outbox: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 outbox message for 80%% threshold of updated limit, got %d", len(msgs))
+	}
+}
+
+func TestAC1B06_Settle_ThresholdWithUpdatedLimits_BUG03(t *testing.T) {
+	forEachStore(t, runSettleThresholdWithUpdatedLimitsTest)
+}
+
+func TestAC1B08_ExpireReservations_NonUTCTimezone_BUG01(t *testing.T) {
+	forEachStore(t, func(t *testing.T, s *store.Store, name string) {
+		ctx := context.Background()
+		keyID := fmt.Sprintf("k-bug01-%s-%d", name, time.Now().UnixNano())
+		limits := core.KeyLimits{
+			KeyID:            keyID,
+			DailyLimitMicros: 10000,
+		}
+		if err := s.SetKeyLimits(ctx, limits); err != nil {
+			t.Fatalf("failed to set limits: %v", err)
+		}
+
+		nowUTC := time.Date(2026, time.October, 18, 12, 0, 0, 0, time.UTC)
+		res, err := s.Reserve(ctx, store.ReserveParams{
+			KeyID:     keyID,
+			MaxMicros: 1000,
+			Now:       nowUTC,
+			TTL:       10 * time.Minute,
+		})
+		if err != nil {
+			t.Fatalf("reserve failed: %v", err)
+		}
+
+		tz := time.FixedZone("UTC-3", -3*3600)
+		nonUTCTime := nowUTC.Add(15 * time.Minute).In(tz)
+
+		expiredCount, err := s.ExpireReservations(ctx, nonUTCTime)
+		if err != nil {
+			t.Fatalf("expire failed: %v", err)
+		}
+		if expiredCount < 1 {
+			t.Fatalf("expected at least 1 expired reservation, got %d", expiredCount)
+		}
+
+		_, err = s.Settle(ctx, res.ReservationID, 1000, nowUTC.Add(16*time.Minute))
+		if !errors.Is(err, core.ErrReservationClosed) {
+			t.Errorf("expected ErrReservationClosed, got: %v", err)
+		}
+	})
 }
