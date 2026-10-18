@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package lgw.events.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/Leonardoongaratto/llm-gateway/gen/lgw/events/v1;eventsv1";
+
+message UsageRecorded {
+  string request_id = 1;
+  google.protobuf.Timestamp occurred_at = 2;
+  string source = 3;
+  string cost_kind = 4;
+  string key_id = 5;
+  string project = 6;
+  string model_requested = 7;
+  string model_used = 8;
+  string provider = 9;
+  int64 input_tokens = 10;
+  int64 output_tokens = 11;
+  int64 cache_read_tokens = 12;
+  int64 cache_write_tokens = 13;
+  int64 cost_micros = 14;
+  int64 latency_ms = 15;
+  string status = 16;
+  bool cache_hit = 17;
+  string fallback_from = 18;
+}
+
+message ProviderFallback {
+  string request_id = 1;
+  google.protobuf.Timestamp occurred_at = 2;
+  string from_provider = 3;
+  string to_provider = 4;
+  string reason = 5;
+}
+
+message BudgetThreshold {
+  string key_id = 1;
+  string period = 2;
+  int32 level = 3;
+  int64 spent_micros = 4;
+  int64 limit_micros = 5;
+  google.protobuf.Timestamp occurred_at = 6;
+}
+
+message KeyLimit {
+  string key_id = 1;
+  int64 daily_limit_micros = 2;
+  int64 monthly_limit_micros = 3;
+  int32 rpm = 4;
+}
+
+message ConfigChanged {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KEY = 1;
+    PRICING = 2;
+    MODELS = 3;
+  }
+  Kind kind = 1;
+  int64 version = 2;
+  repeated KeyLimit key_limits = 3;
+}

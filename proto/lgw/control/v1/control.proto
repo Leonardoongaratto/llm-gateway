@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package lgw.control.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/Leonardoongaratto/llm-gateway/gen/lgw/control/v1;controlv1";
+
+service ControlService {
+  rpc GetSnapshot(GetSnapshotRequest) returns (Snapshot);
+}
+
+message GetSnapshotRequest {}
+
+message KeyInfo {
+  string id = 1;
+  string name = 2;
+  string key_hash = 3;
+  repeated string allowed_models = 4;
+  bool active = 5;
+  google.protobuf.Timestamp expires_at = 6;
+}
+
+message PricingInfo {
+  string model = 1;
+  string provider = 2;
+  int64 input_per_mtok_micros = 3;
+  int64 output_per_mtok_micros = 4;
+  int64 cache_read_per_mtok_micros = 5;
+  int64 cache_write_per_mtok_micros = 6;
+}
+
+message LogicalModelInfo {
+  string name = 1;
+  repeated string chain = 2;
+}
+
+message Snapshot {
+  int64 version = 1;
+  repeated KeyInfo keys = 2;
+  repeated PricingInfo pricing = 3;
+  repeated LogicalModelInfo logical_models = 4;
+}

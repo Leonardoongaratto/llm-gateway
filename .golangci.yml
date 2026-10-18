@@ -1,0 +1,34 @@
+version: "2"
+run:
+  tests: true
+linters:
+  enable:
+    - errcheck
+    - errorlint
+    - gocognit
+    - gocritic
+    - revive
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+    gocognit:
+      min-complexity: 15
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
