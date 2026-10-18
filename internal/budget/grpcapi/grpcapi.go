@@ -86,9 +86,19 @@ func (s *Server) Reserve(ctx context.Context, req *budgetv1.ReserveRequest) (*bu
 		return nil, mapError(err)
 	}
 
+	remainingMicros := int64(-1)
+	switch {
+	case res.RemainingDailyMicros >= 0 && res.RemainingMonthlyMicros >= 0:
+		remainingMicros = min(res.RemainingDailyMicros, res.RemainingMonthlyMicros)
+	case res.RemainingDailyMicros >= 0:
+		remainingMicros = res.RemainingDailyMicros
+	case res.RemainingMonthlyMicros >= 0:
+		remainingMicros = res.RemainingMonthlyMicros
+	}
+
 	return &budgetv1.ReserveResponse{
 		ReservationId:   res.ReservationID,
-		RemainingMicros: res.RemainingDailyMicros,
+		RemainingMicros: remainingMicros,
 	}, nil
 }
 
@@ -131,17 +141,24 @@ func (s *Server) Remaining(ctx context.Context, req *budgetv1.RemainingRequest) 
 		return nil, mapError(err)
 	}
 
-	remDaily := info.DailyLimitMicros - (info.DailySpentMicros + info.DailyReservedMicros)
-	if remDaily < 0 {
-		remDaily = 0
+	dailyRemaining := int64(-1)
+	if info.DailyLimitMicros > 0 {
+		dailyRemaining = info.DailyLimitMicros - (info.DailySpentMicros + info.DailyReservedMicros)
+		if dailyRemaining < 0 {
+			dailyRemaining = 0
+		}
 	}
-	remMonthly := info.MonthlyLimitMicros - (info.MonthlySpentMicros + info.MonthlyReservedMicros)
-	if remMonthly < 0 {
-		remMonthly = 0
+
+	monthlyRemaining := int64(-1)
+	if info.MonthlyLimitMicros > 0 {
+		monthlyRemaining = info.MonthlyLimitMicros - (info.MonthlySpentMicros + info.MonthlyReservedMicros)
+		if monthlyRemaining < 0 {
+			monthlyRemaining = 0
+		}
 	}
 
 	return &budgetv1.RemainingResponse{
-		DailyMicros:   remDaily,
-		MonthlyMicros: remMonthly,
+		DailyMicros:   dailyRemaining,
+		MonthlyMicros: monthlyRemaining,
 	}, nil
 }

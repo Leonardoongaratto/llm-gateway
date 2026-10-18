@@ -18,6 +18,7 @@ import (
 	"github.com/Leonardoongaratto/llm-gateway/internal/budget/sweeper"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/config"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/health"
+	"github.com/Leonardoongaratto/llm-gateway/internal/platform/logging"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/natsx"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/service"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/sqlx"
@@ -128,7 +129,7 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 		opt(&options)
 	}
 
-	logger := slog.New(slog.NewJSONHandler(options.logWriter, nil))
+	logger := logging.New(options.logWriter, cfg.LogLevel)
 
 	if cfg.DatabaseDriver == "" {
 		cfg.DatabaseDriver = "sqlite"

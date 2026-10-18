@@ -134,9 +134,10 @@ func (x *ReserveRequest) GetRequestId() string {
 }
 
 type ReserveResponse struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	ReservationId   string                 `protobuf:"bytes,1,opt,name=reservation_id,json=reservationId,proto3" json:"reservation_id,omitempty"`
-	RemainingMicros int64                  `protobuf:"varint,2,opt,name=remaining_micros,json=remainingMicros,proto3" json:"remaining_micros,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ReservationId string                 `protobuf:"bytes,1,opt,name=reservation_id,json=reservationId,proto3" json:"reservation_id,omitempty"`
+	// Lowest remaining budget in micros among active limited periods. Returns -1 if unlimited.
+	RemainingMicros int64 `protobuf:"varint,2,opt,name=remaining_micros,json=remainingMicros,proto3" json:"remaining_micros,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -398,9 +399,11 @@ func (x *RemainingRequest) GetKeyId() string {
 }
 
 type RemainingResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	DailyMicros   int64                  `protobuf:"varint,1,opt,name=daily_micros,json=dailyMicros,proto3" json:"daily_micros,omitempty"`
-	MonthlyMicros int64                  `protobuf:"varint,2,opt,name=monthly_micros,json=monthlyMicros,proto3" json:"monthly_micros,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Remaining budget in micros for the current day. Returns -1 if no daily limit configured.
+	DailyMicros int64 `protobuf:"varint,1,opt,name=daily_micros,json=dailyMicros,proto3" json:"daily_micros,omitempty"`
+	// Remaining budget in micros for the current month. Returns -1 if no monthly limit configured.
+	MonthlyMicros int64 `protobuf:"varint,2,opt,name=monthly_micros,json=monthlyMicros,proto3" json:"monthly_micros,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

@@ -59,7 +59,9 @@ func forEachStore(t *testing.T, fn func(t *testing.T, s *store.Store, name strin
 	for name, db := range createTestDBs(t) {
 		t.Run(name, func(t *testing.T) {
 			if name == "postgres" {
-				_, _ = db.Exec("TRUNCATE reservations, budget_periods, outbox, key_limits CASCADE")
+				if _, err := db.Exec("TRUNCATE reservations, budget_periods, outbox, key_limits CASCADE"); err != nil {
+					t.Fatalf("failed to truncate tables: %v", err)
+				}
 			}
 			s := store.New(db)
 			fn(t, s, name)
@@ -549,6 +551,39 @@ func TestAC1B08_ExpireReservations_NonUTCTimezone_BUG01(t *testing.T) {
 		_, err = s.Settle(ctx, res.ReservationID, 1000, nowUTC.Add(16*time.Minute))
 		if !errors.Is(err, core.ErrReservationClosed) {
 			t.Errorf("expected ErrReservationClosed, got: %v", err)
+		}
+	})
+}
+
+func TestAC1B01_Reserve_UnlimitedLimits_BUG06(t *testing.T) {
+	forEachStore(t, func(t *testing.T, s *store.Store, name string) {
+		ctx := context.Background()
+		keyID := fmt.Sprintf("k-unlimited-%s-%d", name, time.Now().UnixNano())
+		limits := core.KeyLimits{
+			KeyID:              keyID,
+			DailyLimitMicros:   0,
+			MonthlyLimitMicros: 50000,
+		}
+		if err := s.SetKeyLimits(ctx, limits); err != nil {
+			t.Fatalf("failed to set limits: %v", err)
+		}
+
+		now := time.Date(2026, time.October, 18, 12, 0, 0, 0, time.UTC)
+		res, err := s.Reserve(ctx, store.ReserveParams{
+			KeyID:     keyID,
+			MaxMicros: 1000,
+			RequestID: "req-unlim-1",
+			Now:       now,
+		})
+		if err != nil {
+			t.Fatalf("unexpected reserve error: %v", err)
+		}
+
+		if res.RemainingDailyMicros != -1 {
+			t.Errorf("expected -1 for unlimited daily limit, got %d", res.RemainingDailyMicros)
+		}
+		if res.RemainingMonthlyMicros != 49000 {
+			t.Errorf("expected 49000 for monthly limit, got %d", res.RemainingMonthlyMicros)
 		}
 	})
 }

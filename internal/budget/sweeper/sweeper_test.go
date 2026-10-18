@@ -151,7 +151,6 @@ func TestAC1B08_SweeperWithStore_EndToEnd(t *testing.T) {
 	}
 
 	sw := sweeper.New(s)
-	// Execute sweep after 60ms (> 50ms TTL)
 	count, err := sw.SweepOnce(ctx, now.Add(60*time.Millisecond))
 	if err != nil {
 		t.Fatalf("sweep failed: %v", err)

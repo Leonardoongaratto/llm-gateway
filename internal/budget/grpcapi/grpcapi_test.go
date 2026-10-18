@@ -76,9 +76,10 @@ func TestGRPC_Reserve_Success(t *testing.T) {
 	mock := &mockStore{
 		reserveFunc: func(_ context.Context, _ store.ReserveParams) (*store.ReserveResult, error) {
 			return &store.ReserveResult{
-				ReservationID:        "res-123",
-				Allowed:              true,
-				RemainingDailyMicros: 4000,
+				ReservationID:          "res-123",
+				Allowed:                true,
+				RemainingDailyMicros:   4000,
+				RemainingMonthlyMicros: -1,
 			}, nil
 		},
 	}
@@ -232,5 +233,53 @@ func TestGRPC_Remaining(t *testing.T) {
 	_, err = client.Remaining(context.Background(), &budgetv1.RemainingRequest{KeyId: "not-found"})
 	if status.Code(err) != codes.NotFound {
 		t.Errorf("expected NotFound for unknown key, got %v", err)
+	}
+}
+
+func TestGRPC_ReserveAndRemaining_UnlimitedLimits_BUG06(t *testing.T) {
+	mock := &mockStore{
+		reserveFunc: func(_ context.Context, _ store.ReserveParams) (*store.ReserveResult, error) {
+			return &store.ReserveResult{
+				ReservationID:          "res-unlim",
+				Allowed:                true,
+				RemainingDailyMicros:   -1,
+				RemainingMonthlyMicros: 49000,
+			}, nil
+		},
+		remainingFunc: func(_ context.Context, keyID string, _ time.Time) (*store.RemainingInfo, error) {
+			return &store.RemainingInfo{
+				KeyID:                 keyID,
+				DailyLimitMicros:      0,
+				MonthlyLimitMicros:    50000,
+				DailySpentMicros:      500,
+				DailyReservedMicros:   0,
+				MonthlySpentMicros:    1000,
+				MonthlyReservedMicros: 0,
+			}, nil
+		},
+	}
+	client := setupTestServer(t, mock)
+
+	reserveResp, err := client.Reserve(context.Background(), &budgetv1.ReserveRequest{
+		KeyId:     "key-unlimited",
+		MaxMicros: 1000,
+		RequestId: "req-1",
+	})
+	if err != nil {
+		t.Fatalf("expected reserve success, got %v", err)
+	}
+	if reserveResp.RemainingMicros != 49000 {
+		t.Errorf("expected 49000 as constraining remaining micros, got %d", reserveResp.RemainingMicros)
+	}
+
+	remResp, err := client.Remaining(context.Background(), &budgetv1.RemainingRequest{KeyId: "key-unlimited"})
+	if err != nil {
+		t.Fatalf("expected remaining success, got %v", err)
+	}
+	if remResp.DailyMicros != -1 {
+		t.Errorf("expected -1 for unlimited daily limit, got %d", remResp.DailyMicros)
+	}
+	if remResp.MonthlyMicros != 49000 {
+		t.Errorf("expected 49000 for monthly limit, got %d", remResp.MonthlyMicros)
 	}
 }

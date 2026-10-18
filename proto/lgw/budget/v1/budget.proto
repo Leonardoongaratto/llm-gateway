@@ -19,6 +19,7 @@ message ReserveRequest {
 
 message ReserveResponse {
   string reservation_id = 1;
+  // Lowest remaining budget in micros among active limited periods. Returns -1 if unlimited.
   int64 remaining_micros = 2;
 }
 
@@ -40,7 +41,9 @@ message RemainingRequest {
 }
 
 message RemainingResponse {
+  // Remaining budget in micros for the current day. Returns -1 if no daily limit configured.
   int64 daily_micros = 1;
+  // Remaining budget in micros for the current month. Returns -1 if no monthly limit configured.
   int64 monthly_micros = 2;
 }
 

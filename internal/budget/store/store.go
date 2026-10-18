@@ -198,8 +198,23 @@ func (s *Store) checkBalancesAndReserve(ctx context.Context, tx *sql.Tx, limits 
 		return 0, 0, err
 	}
 
-	remDaily = int64(limits.DailyLimitMicros) - (daySpent + dayReserved + maxMicros)
-	remMonthly = int64(limits.MonthlyLimitMicros) - (monthSpent + monthReserved + maxMicros)
+	if limits.DailyLimitMicros <= 0 {
+		remDaily = -1
+	} else {
+		remDaily = int64(limits.DailyLimitMicros) - (daySpent + dayReserved + maxMicros)
+		if remDaily < 0 {
+			remDaily = 0
+		}
+	}
+
+	if limits.MonthlyLimitMicros <= 0 {
+		remMonthly = -1
+	} else {
+		remMonthly = int64(limits.MonthlyLimitMicros) - (monthSpent + monthReserved + maxMicros)
+		if remMonthly < 0 {
+			remMonthly = 0
+		}
+	}
 	return remDaily, remMonthly, nil
 }
 

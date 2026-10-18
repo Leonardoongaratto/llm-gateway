@@ -1,9 +1,13 @@
 package outbox_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +20,23 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/encoding/protojson"
 )
+
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (n int, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 func setupTestEnv(t *testing.T) (*store.Store, jetstream.JetStream) {
 	t.Helper()
@@ -151,7 +172,10 @@ func TestConfigConsumer_MalformedPayload_Terminated(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	consumer, err := outbox.NewConfigConsumer(s, js)
+	var logBuf syncBuffer
+	testLogger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+	consumer, err := outbox.NewConfigConsumer(s, js, outbox.WithConsumerLogger(testLogger))
 	if err != nil {
 		t.Fatalf("failed to create config consumer: %v", err)
 	}
@@ -167,7 +191,23 @@ func TestConfigConsumer_MalformedPayload_Terminated(t *testing.T) {
 		t.Fatalf("failed to publish poison pill: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	logged := false
+	for i := 0; i < 20; i++ {
+		time.Sleep(20 * time.Millisecond)
+		if strings.Contains(logBuf.String(), "malformed config event, terminating poison pill") {
+			logged = true
+			break
+		}
+	}
+	if !logged {
+		t.Fatal("expected poison pill termination log message")
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	count := strings.Count(logBuf.String(), "malformed config event, terminating poison pill")
+	if count != 1 {
+		t.Fatalf("expected exactly 1 termination log without redeliveries, got %d", count)
+	}
 }
 
 func TestRelay_Run_GracefulShutdownAndOptions(t *testing.T) {
