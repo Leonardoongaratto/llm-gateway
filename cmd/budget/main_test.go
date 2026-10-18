@@ -13,11 +13,12 @@ import (
 	"time"
 
 	budgetv1 "github.com/Leonardoongaratto/llm-gateway/gen/lgw/budget/v1"
+	"github.com/Leonardoongaratto/llm-gateway/internal/budget/core"
+	"github.com/Leonardoongaratto/llm-gateway/internal/budget/store"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/config"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/grpcx"
-	"google.golang.org/grpc/codes"
+	"github.com/Leonardoongaratto/llm-gateway/internal/platform/natsx"
 	"google.golang.org/grpc/health/grpc_health_v1"
-	"google.golang.org/grpc/status"
 )
 
 func getFreePort(t *testing.T) int {
@@ -105,18 +106,26 @@ func TestBudget_RunAndEndpoints_AC1A11(t *testing.T) {
 	httpPort := getFreePort(t)
 	grpcPort := getFreePort(t)
 	cfg := Config{
-		ServiceName: "budget",
-		HTTPPort:    httpPort,
-		GRPCPort:    grpcPort,
-		LogLevel:    "debug",
+		ServiceName:    "budget",
+		HTTPPort:       httpPort,
+		GRPCPort:       grpcPort,
+		LogLevel:       "debug",
+		DatabaseDriver: "sqlite",
 	}
 
 	var logBuf bytes.Buffer
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 
+	seeder := func(s *store.Store) error {
+		return s.SetKeyLimits(context.Background(), core.KeyLimits{
+			KeyID:            "k-1",
+			DailyLimitMicros: 5000,
+		})
+	}
+
 	go func() {
-		errCh <- run(ctx, cfg, WithLogWriter(&logBuf))
+		errCh <- run(ctx, cfg, WithLogWriter(&logBuf), WithStoreSeeder(seeder))
 	}()
 
 	url := fmt.Sprintf("http://127.0.0.1:%d", httpPort)
@@ -135,10 +144,14 @@ func TestBudget_RunAndEndpoints_AC1A11(t *testing.T) {
 	}
 
 	budgetClient := budgetv1.NewBudgetServiceClient(grpcConn)
-	_, err = budgetClient.Remaining(context.Background(), &budgetv1.RemainingRequest{KeyId: "k-1"})
-	if status.Code(err) != codes.Unimplemented {
+	remResp, err := budgetClient.Remaining(context.Background(), &budgetv1.RemainingRequest{KeyId: "k-1"})
+	if err != nil {
 		_ = grpcConn.Close()
-		t.Fatalf("expected Unimplemented error for placeholder service, got: %v", err)
+		t.Fatalf("expected Remaining success on configured key, got error: %v", err)
+	}
+	if remResp == nil {
+		_ = grpcConn.Close()
+		t.Fatal("expected non-nil remaining response")
 	}
 
 	_ = grpcConn.Close()
@@ -166,10 +179,11 @@ func TestBudget_Readyz503WithFailingCheck(t *testing.T) {
 	httpPort := getFreePort(t)
 	grpcPort := getFreePort(t)
 	cfg := Config{
-		ServiceName: "budget",
-		HTTPPort:    httpPort,
-		GRPCPort:    grpcPort,
-		LogLevel:    "debug",
+		ServiceName:    "budget",
+		HTTPPort:       httpPort,
+		GRPCPort:       grpcPort,
+		LogLevel:       "debug",
+		DatabaseDriver: "sqlite",
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -185,6 +199,87 @@ func TestBudget_Readyz503WithFailingCheck(t *testing.T) {
 
 	url := fmt.Sprintf("http://127.0.0.1:%d/readyz", httpPort)
 	waitForStatus(t, url, http.StatusServiceUnavailable)
+
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+}
+
+func TestBudget_RunErrors(t *testing.T) {
+	t.Run("invalid database driver", func(t *testing.T) {
+		cfg := Config{
+			DatabaseDriver: "unsupported-driver",
+		}
+		err := run(context.Background(), cfg, WithLogWriter(io.Discard))
+		if err == nil || !strings.Contains(err.Error(), "unsupported database driver") {
+			t.Fatalf("expected unsupported driver error, got: %v", err)
+		}
+	})
+
+	t.Run("failing seeder", func(t *testing.T) {
+		cfg := Config{
+			DatabaseDriver: "sqlite",
+		}
+		failingSeeder := func(_ *store.Store) error {
+			return errors.New("seeder failure")
+		}
+		err := run(context.Background(), cfg, WithLogWriter(io.Discard), WithStoreSeeder(failingSeeder))
+		if err == nil || !strings.Contains(err.Error(), "seeder failure") {
+			t.Fatalf("expected seeder failure, got: %v", err)
+		}
+	})
+
+	t.Run("nats connection failure handled gracefully", func(t *testing.T) {
+		cfg := Config{
+			ServiceName:    "budget",
+			HTTPPort:       getFreePort(t),
+			GRPCPort:       getFreePort(t),
+			DatabaseDriver: "sqlite",
+			NATSURL:        "nats://127.0.0.1:1",
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- run(ctx, cfg, WithLogWriter(io.Discard))
+		}()
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+		if err := <-errCh; err != nil {
+			t.Fatalf("expected clean run even with nats error, got: %v", err)
+		}
+	})
+}
+
+func TestBudget_RealMain_ServiceErrorReturnsOne(t *testing.T) {
+	t.Setenv("LGW_DATABASE_DRIVER", "invalid-driver")
+	code := realMain()
+	if code != 1 {
+		t.Errorf("expected exit code 1 for failing service run, got %d", code)
+	}
+}
+
+func TestBudget_RunWithNATS(t *testing.T) {
+	_, natsURL := natsx.StartEmbeddedServer(t)
+	httpPort := getFreePort(t)
+	grpcPort := getFreePort(t)
+	cfg := Config{
+		ServiceName:    "budget",
+		HTTPPort:       httpPort,
+		GRPCPort:       grpcPort,
+		LogLevel:       "debug",
+		DatabaseDriver: "sqlite",
+		NATSURL:        natsURL,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(ctx, cfg, WithLogWriter(io.Discard))
+	}()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d", httpPort)
+	waitForEndpoints(t, url)
 
 	cancel()
 	if err := <-errCh; err != nil {
