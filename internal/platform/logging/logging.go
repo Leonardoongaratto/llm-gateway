@@ -59,7 +59,7 @@ func New(w io.Writer, levelStr string) *slog.Logger {
 
 	jsonHandler := slog.NewJSONHandler(w, &slog.HandlerOptions{
 		Level: level,
-		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
 			if isSensitive(a.Key) {
 				return slog.String(a.Key, "[REDACTED]")
 			}

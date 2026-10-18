@@ -11,12 +11,14 @@ if (-not (Test-Path $binDir)) {
     New-Item -ItemType Directory -Path $binDir -Force | Out-Null
 }
 
+Get-Process edge, gateway, control, budget, usage -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$binDir*" } | Stop-Process -Force
+
 $services = @(
     @{ Name = "edge"; Cmd = "./cmd/edge"; Exe = Join-Path $binDir "edge.exe"; Port = 8787 },
     @{ Name = "gateway"; Cmd = "./cmd/gateway"; Exe = Join-Path $binDir "gateway.exe"; Port = 8788 },
     @{ Name = "control"; Cmd = "./cmd/control"; Exe = Join-Path $binDir "control.exe"; Port = 8790 },
-    @{ Name = "budget"; Cmd = "./cmd/budget"; Exe = Join-Path $binDir "budget.exe"; Port = 8791 },
-    @{ Name = "usage"; Cmd = "./cmd/usage"; Exe = Join-Path $binDir "usage.exe"; Port = 8792 }
+    @{ Name = "budget"; Cmd = "./cmd/budget"; Exe = Join-Path $binDir "budget.exe"; Port = 8792 },
+    @{ Name = "usage"; Cmd = "./cmd/usage"; Exe = Join-Path $binDir "usage.exe"; Port = 8791 }
 )
 
 Write-Host "==> Compiling service binaries..."
@@ -39,7 +41,6 @@ try {
         Write-Host "Started $($svc.Name) (PID $($p.Id)) on HTTP port $($svc.Port)"
     }
 
-    # Verify each service endpoints
     Write-Host "==> Validating endpoints via curl.exe..."
     $endpoints = @("/livez", "/readyz", "/metrics")
 
@@ -48,7 +49,6 @@ try {
         $p = $entry.Process
         $base = "http://127.0.0.1:$($svc.Port)"
 
-        # Wait for livez
         $ready = $false
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
@@ -91,7 +91,6 @@ finally {
                 Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
                 Write-Host "Stopped $($entry.Service.Name) (PID $($p.Id))"
             } catch {
-                # ignore
             }
         }
     }

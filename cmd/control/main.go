@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -23,21 +24,42 @@ import (
 type Config struct {
 	ServiceName  string `env:"SERVICE_NAME" default:"control"`
 	HTTPPort     int    `env:"HTTP_PORT" default:"8790"`
-	GRPCPort     int    `env:"GRPC_PORT" default:"9101"`
+	GRPCPort     int    `env:"GRPC_PORT" default:"9102"`
 	LogLevel     string `env:"LOG_LEVEL" default:"info"`
 	OTelEndpoint string `env:"OTEL_ENDPOINT" default:""`
 }
 
-type placeholderControlServer struct {
-	controlv1.UnimplementedControlServiceServer
+type namedCheck struct {
+	name  string
+	check health.CheckFunc
 }
 
-func (s *placeholderControlServer) GetSnapshot(ctx context.Context, req *controlv1.GetSnapshotRequest) (*controlv1.Snapshot, error) {
-	return &controlv1.Snapshot{Version: 1}, nil
+type runOptions struct {
+	logWriter   io.Writer
+	extraChecks []namedCheck
 }
 
-func run(ctx context.Context, cfg Config) error {
-	logger := logging.New(os.Stdout, cfg.LogLevel)
+type RunOption func(*runOptions)
+
+func WithLogWriter(w io.Writer) RunOption {
+	return func(o *runOptions) {
+		o.logWriter = w
+	}
+}
+
+func WithCheck(name string, check health.CheckFunc) RunOption {
+	return func(o *runOptions) {
+		o.extraChecks = append(o.extraChecks, namedCheck{name: name, check: check})
+	}
+}
+
+func run(ctx context.Context, cfg Config, opts ...RunOption) error {
+	options := runOptions{logWriter: os.Stdout}
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	logger := logging.New(options.logWriter, cfg.LogLevel)
 	slog.SetDefault(logger)
 
 	otelProvider, err := otel.Init(ctx, otel.Config{
@@ -50,6 +72,9 @@ func run(ctx context.Context, cfg Config) error {
 	defer func() { _ = otelProvider.Shutdown(context.Background()) }()
 
 	checker := health.New()
+	for _, ec := range options.extraChecks {
+		checker.RegisterCheck(ec.name, ec.check)
+	}
 
 	grpcLis, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.GRPCPort))
 	if err != nil {
@@ -57,7 +82,7 @@ func run(ctx context.Context, cfg Config) error {
 	}
 
 	grpcServer := grpcx.NewServer(grpcx.WithServerLogger(logger))
-	controlv1.RegisterControlServiceServer(grpcServer, &placeholderControlServer{})
+	controlv1.RegisterControlServiceServer(grpcServer, &controlv1.UnimplementedControlServiceServer{})
 
 	go func() {
 		logger.Info("starting control grpc server", slog.Int("port", cfg.GRPCPort))
@@ -106,17 +131,23 @@ func run(ctx context.Context, cfg Config) error {
 	return nil
 }
 
-func main() {
+func realMain() int {
 	cfg, err := config.LoadFromEnv[Config]("LGW_")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	if err := run(ctx, *cfg); err != nil {
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "service error: %v\n", err)
+		return 1
 	}
+	return 0
+}
+
+func main() {
+	os.Exit(realMain())
 }

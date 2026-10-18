@@ -14,20 +14,8 @@ Write-Host "Running staticcheck..."
 go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-Write-Host "Running golangci-lint..."
-$ErrorActionPreference = 'Continue'
-$glOutput = cmd.exe /c "golangci-lint run 2>&1"
-$exit = $LASTEXITCODE
-$ErrorActionPreference = 'Stop'
-
-if ($exit -ne 0) {
-    $outStr = $glOutput -join "`n"
-    if ($outStr -match 'export data version') {
-        Write-Warning "golangci-lint: export data format version in toolchain is ahead of golangci-lint binary; verified cleanly with staticcheck and go vet."
-    } else {
-        Write-Error $outStr
-        exit $exit
-    }
-}
+Write-Host "Running golangci-lint v2..."
+go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0 run
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "lint: ok"

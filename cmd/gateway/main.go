@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -24,8 +25,37 @@ type Config struct {
 	OTelEndpoint string `env:"OTEL_ENDPOINT" default:""`
 }
 
-func run(ctx context.Context, cfg Config) error {
-	logger := logging.New(os.Stdout, cfg.LogLevel)
+type namedCheck struct {
+	name  string
+	check health.CheckFunc
+}
+
+type runOptions struct {
+	logWriter   io.Writer
+	extraChecks []namedCheck
+}
+
+type RunOption func(*runOptions)
+
+func WithLogWriter(w io.Writer) RunOption {
+	return func(o *runOptions) {
+		o.logWriter = w
+	}
+}
+
+func WithCheck(name string, check health.CheckFunc) RunOption {
+	return func(o *runOptions) {
+		o.extraChecks = append(o.extraChecks, namedCheck{name: name, check: check})
+	}
+}
+
+func run(ctx context.Context, cfg Config, opts ...RunOption) error {
+	options := runOptions{logWriter: os.Stdout}
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	logger := logging.New(options.logWriter, cfg.LogLevel)
 	slog.SetDefault(logger)
 
 	otelProvider, err := otel.Init(ctx, otel.Config{
@@ -38,6 +68,9 @@ func run(ctx context.Context, cfg Config) error {
 	defer func() { _ = otelProvider.Shutdown(context.Background()) }()
 
 	checker := health.New()
+	for _, ec := range options.extraChecks {
+		checker.RegisterCheck(ec.name, ec.check)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/livez", checker.LivezHandler())
@@ -77,17 +110,23 @@ func run(ctx context.Context, cfg Config) error {
 	return nil
 }
 
-func main() {
+func realMain() int {
 	cfg, err := config.LoadFromEnv[Config]("LGW_")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	if err := run(ctx, *cfg); err != nil {
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "service error: %v\n", err)
+		return 1
 	}
+	return 0
+}
+
+func main() {
+	os.Exit(realMain())
 }

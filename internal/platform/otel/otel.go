@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/exporters/prometheus"
@@ -28,13 +29,11 @@ type Provider struct {
 
 // Init sets up tracing, W3C propagation, and Prometheus metrics.
 func Init(ctx context.Context, cfg Config) (*Provider, error) {
-	// 1. Text Map Propagators (W3C TraceContext + Baggage)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
 
-	// 2. Resource attributes (schemaless merge avoids schema url conflict with Default)
 	res, err := resource.Merge(
 		resource.Default(),
 		resource.NewSchemaless(
@@ -45,7 +44,6 @@ func Init(ctx context.Context, cfg Config) (*Provider, error) {
 		return nil, err
 	}
 
-	// 3. Tracer Provider
 	var tracerProvider *sdktrace.TracerProvider
 	if cfg.OTelEndpoint != "" {
 		exp, err := otlptracehttp.New(ctx,
@@ -64,7 +62,6 @@ func Init(ctx context.Context, cfg Config) (*Provider, error) {
 	}
 	otel.SetTracerProvider(tracerProvider)
 
-	// 4. Meter Provider with Prometheus Exporter
 	promExporter, err := prometheus.New()
 	if err != nil {
 		return nil, err
@@ -100,4 +97,27 @@ func (p *Provider) Shutdown(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// HTTPHandler wraps an http.Handler with OpenTelemetry tracing and propagation.
+func HTTPHandler(handler http.Handler, operation string) http.Handler {
+	return otelhttp.NewHandler(handler, operation)
+}
+
+// HTTPTransport returns an http.RoundTripper with OpenTelemetry tracing and propagation.
+func HTTPTransport(base http.RoundTripper) http.RoundTripper {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return otelhttp.NewTransport(base)
+}
+
+// HTTPClient returns an http.Client equipped with OpenTelemetry tracing and propagation.
+func HTTPClient(base *http.Client) *http.Client {
+	if base == nil {
+		base = &http.Client{}
+	}
+	c := *base
+	c.Transport = HTTPTransport(c.Transport)
+	return &c
 }

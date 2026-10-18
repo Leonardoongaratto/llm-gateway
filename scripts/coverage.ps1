@@ -24,13 +24,13 @@ function Test-Package([string]$Package, [string]$CoverFile) {
 }
 
 $allPackages = go list ./...
-# Exclude generated code and testdata from coverage calculation
 $packages = $allPackages | Where-Object { $_ -notmatch '/gen/' -and $_ -notmatch '/testdata' }
 $coverFiles = @()
 $failed = $false
+$tempDir = [System.IO.Path]::GetTempPath()
 
 foreach ($package in $packages) {
-    $coverFile = Join-Path $env:TEMP ('llm-gateway-cover-' + ($package -replace '[^a-zA-Z0-9]', '_') + '.out')
+    $coverFile = Join-Path $tempDir ('llm-gateway-cover-' + ($package -replace '[^a-zA-Z0-9]', '_') + '.out')
     $coverFiles += $coverFile
     if (-not (Test-Package $package $coverFile)) { $failed = $true }
 }

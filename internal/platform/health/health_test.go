@@ -33,10 +33,10 @@ func TestLivez(t *testing.T) {
 
 func TestReadyz_AllPassing(t *testing.T) {
 	checker := health.New()
-	checker.RegisterCheck("db", func(ctx context.Context) error {
+	checker.RegisterCheck("db", func(_ context.Context) error {
 		return nil
 	})
-	checker.RegisterCheck("nats", func(ctx context.Context) error {
+	checker.RegisterCheck("nats", func(_ context.Context) error {
 		return nil
 	})
 
@@ -66,10 +66,10 @@ func TestReadyz_AllPassing(t *testing.T) {
 
 func TestReadyz_CheckFails(t *testing.T) {
 	checker := health.New()
-	checker.RegisterCheck("db", func(ctx context.Context) error {
+	checker.RegisterCheck("db", func(_ context.Context) error {
 		return nil
 	})
-	checker.RegisterCheck("nats", func(ctx context.Context) error {
+	checker.RegisterCheck("nats", func(_ context.Context) error {
 		return errors.New("connection refused")
 	})
 

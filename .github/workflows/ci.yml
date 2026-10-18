@@ -32,6 +32,22 @@ jobs:
             exit 1
           fi
 
+  actionlint:
+    name: Workflow Lint (actionlint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          check-latest: true
+
+      - name: Run actionlint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/ci.yml
+
   buf:
     name: Protobuf & Buf Checks
     runs-on: ubuntu-latest
@@ -47,8 +63,8 @@ jobs:
 
       - name: Install protoc-gen-go & protoc-gen-go-grpc
         run: |
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
 
       - name: Set up Buf
         uses: bufbuild/buf-setup-action@v1
@@ -60,6 +76,7 @@ jobs:
         run: |
           buf generate
           git diff --exit-code gen/
+          test -z "$(git status --porcelain gen/)"
 
       - name: Buf Breaking Change Detection
         uses: bufbuild/buf-breaking-action@v1
@@ -82,6 +99,12 @@ jobs:
 
       - name: Go Vet
         run: go vet ./...
+
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+
+      - name: golangci-lint
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0 run
 
   test:
     name: Tests & Coverage (with PostgreSQL)
@@ -111,9 +134,21 @@ jobs:
           go-version: '1.27'
           check-latest: true
 
+      - name: Install protoc-gen-go & protoc-gen-go-grpc
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+
+      - name: Set up Buf
+        uses: bufbuild/buf-setup-action@v1
+
       - name: Run Tests with Race Detector and Coverage
         env:
           LGW_TEST_PG_DSN: "postgres://postgres:postgres@localhost:5432/llm_gateway_test?sslmode=disable"
         run: |
-          go test -race -v -coverprofile=coverage.out ./...
+          PACKAGES=$(go list ./... | grep -v /gen/)
+          go test -race -v -coverprofile=coverage.out $PACKAGES
           go tool cover -func=coverage.out
+          TOTAL=$(go tool cover -func=coverage.out | grep total: | awk '{print $3}' | tr -d '%')
+          echo "Total coverage: $TOTAL%"
+          awk -v cov="$TOTAL" 'BEGIN { if (cov < 80.0) { print "Coverage " cov "% is below threshold of 80%"; exit 1 } }'

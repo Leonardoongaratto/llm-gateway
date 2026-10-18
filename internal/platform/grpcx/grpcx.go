@@ -7,6 +7,7 @@ import (
 	"runtime/debug"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -43,6 +44,7 @@ func NewServer(opts ...ServerOption) *grpc.Server {
 	}
 
 	srv := grpc.NewServer(
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.ChainUnaryInterceptor(unaryInterceptors...),
 	)
 
@@ -107,7 +109,7 @@ func WithMaxRetries(n int) ClientOption {
 }
 
 // Dial connects to a gRPC target with default credentials, deadline enforcement, and retry on Unavailable.
-func Dial(ctx context.Context, target string, opts ...ClientOption) (*grpc.ClientConn, error) {
+func Dial(_ context.Context, target string, opts ...ClientOption) (*grpc.ClientConn, error) {
 	cfg := &clientConfig{
 		defaultDeadline: 50 * time.Millisecond,
 		maxRetries:      2,
@@ -118,32 +120,47 @@ func Dial(ctx context.Context, target string, opts ...ClientOption) (*grpc.Clien
 
 	dialOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 		grpc.WithUnaryInterceptor(clientUnaryInterceptor(cfg)),
 	}
 
 	return grpc.NewClient(target, dialOpts...)
 }
 
+func waitWithJitter(ctx context.Context, attempt int) error {
+	if attempt == 0 {
+		return nil
+	}
+	jitter := time.Duration(rand.IntN(3)+2) * time.Millisecond * time.Duration(attempt)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(jitter):
+		return nil
+	}
+}
+
+func shouldRetry(err error) bool {
+	if err == nil {
+		return false
+	}
+	st, ok := status.FromError(err)
+	return ok && st.Code() == codes.Unavailable
+}
+
 func clientUnaryInterceptor(cfg *clientConfig) grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		callCtx := ctx
-		var cancel context.CancelFunc
-
 		if _, hasDeadline := ctx.Deadline(); !hasDeadline && cfg.defaultDeadline > 0 {
+			var cancel context.CancelFunc
 			callCtx, cancel = context.WithTimeout(ctx, cfg.defaultDeadline)
 			defer cancel()
 		}
 
 		var lastErr error
 		for attempt := 0; attempt <= cfg.maxRetries; attempt++ {
-			if attempt > 0 {
-				// Jittered backoff: 2ms..5ms * attempt
-				jitter := time.Duration(rand.IntN(3)+2) * time.Millisecond * time.Duration(attempt)
-				select {
-				case <-callCtx.Done():
-					return callCtx.Err()
-				case <-time.After(jitter):
-				}
+			if err := waitWithJitter(callCtx, attempt); err != nil {
+				return err
 			}
 
 			err := invoker(callCtx, method, req, reply, cc, opts...)
@@ -152,13 +169,8 @@ func clientUnaryInterceptor(cfg *clientConfig) grpc.UnaryClientInterceptor {
 			}
 
 			lastErr = err
-			st, ok := status.FromError(err)
-			if !ok || st.Code() != codes.Unavailable {
+			if !shouldRetry(err) || callCtx.Err() != nil {
 				return err
-			}
-
-			if callCtx.Err() != nil {
-				return callCtx.Err()
 			}
 		}
 

@@ -15,37 +15,17 @@ import (
 	budgetv1 "github.com/Leonardoongaratto/llm-gateway/gen/lgw/budget/v1"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/grpcx"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/natsx"
-	"github.com/nats-io/nats.go"
+	platformotel "github.com/Leonardoongaratto/llm-gateway/internal/platform/otel"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
-	"google.golang.org/grpc/metadata"
 )
 
-// AC-1A-09: Given o NATS embutido e um consumidor que dá nack sempre,
-// when uma mensagem é publicada, then ela é reentregue com backoff e vai para lgw.dlq.<subject> após 5 tentativas;
-// publicar duas vezes com o mesmo Nats-Msg-Id armazena uma só.
-func TestAC1A09_DLQAndDeduplication(t *testing.T) {
-	_, url := natsx.StartEmbeddedServer(t)
-
-	nc, js, err := natsx.Connect(url)
-	if err != nil {
-		t.Fatalf("failed to connect to embedded nats: %v", err)
-	}
-	defer nc.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	if err := natsx.InitStreams(ctx, js); err != nil {
-		t.Fatalf("failed to init streams: %v", err)
-	}
-
-	// 1. Test Deduplication
-	subject := "lgw.usage.recorded.v1"
+func runDeduplicationTest(ctx context.Context, t *testing.T, js jetstream.JetStream, subject string) {
+	t.Helper()
 	msgID := "unique-dedupe-id-123"
 
 	ack1, err := natsx.Publish(ctx, js, subject, []byte(`{"id":"1"}`), msgID)
@@ -64,7 +44,6 @@ func TestAC1A09_DLQAndDeduplication(t *testing.T) {
 		t.Fatal("expected second publish with same Nats-Msg-Id to be reported as duplicate")
 	}
 
-	// Verify stream has only 1 message stored
 	info, err := js.Stream(ctx, natsx.StreamUsage)
 	if err != nil {
 		t.Fatalf("failed to get stream info: %v", err)
@@ -76,30 +55,43 @@ func TestAC1A09_DLQAndDeduplication(t *testing.T) {
 	if streamState.State.Msgs != 1 {
 		t.Errorf("expected 1 message in stream, got %d", streamState.State.Msgs)
 	}
+}
 
-	// 2. Test DLQ forwarding after 5 deliveries
-	// Also configure a stream or subject listener for the DLQ subject
+func runDLQTest(ctx context.Context, t *testing.T, js jetstream.JetStream, subject string) {
+	t.Helper()
 	dlqSubject := natsx.DLQSubject(subject)
-	dlqReceived := make(chan *nats.Msg, 1)
-	_, err = nc.Subscribe(dlqSubject, func(m *nats.Msg) {
-		dlqReceived <- m
+	dlqConsumer, err := js.CreateOrUpdateConsumer(ctx, natsx.StreamDLQ, jetstream.ConsumerConfig{
+		Durable:       "test-dlq-stream-consumer",
+		FilterSubject: dlqSubject,
+		AckPolicy:     jetstream.AckExplicitPolicy,
 	})
 	if err != nil {
-		t.Fatalf("failed to subscribe to DLQ: %v", err)
+		t.Fatalf("failed to create DLQ JetStream consumer: %v", err)
 	}
 
+	dlqReceived := make(chan jetstream.Msg, 1)
+	dlqConsumeCtx, err := dlqConsumer.Consume(func(m jetstream.Msg) {
+		dlqReceived <- m
+		_ = m.Ack()
+	})
+	if err != nil {
+		t.Fatalf("failed to consume DLQ: %v", err)
+	}
+	defer dlqConsumeCtx.Stop()
+
 	consumer, err := js.CreateOrUpdateConsumer(ctx, natsx.StreamUsage, jetstream.ConsumerConfig{
-		Durable:       "test-retry-consumer",
+		Durable:       "test-worker-consumer",
 		FilterSubject: subject,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		MaxDeliver:    5,
+		AckWait:       100 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("failed to create consumer: %v", err)
 	}
 
 	var deliveryAttempts atomic.Int32
-	consumeCtx, err := natsx.ConsumeWithDLQ(ctx, js, consumer, func(c context.Context, msg jetstream.Msg) error {
+	consumeCtx, err := natsx.ConsumeWithDLQ(ctx, js, consumer, func(_ context.Context, _ jetstream.Msg) error {
 		deliveryAttempts.Add(1)
 		return errors.New("simulated transient handler failure")
 	}, 5)
@@ -108,11 +100,10 @@ func TestAC1A09_DLQAndDeduplication(t *testing.T) {
 	}
 	defer consumeCtx.Stop()
 
-	// Wait for message to land in DLQ
 	select {
 	case dlqMsg := <-dlqReceived:
-		if dlqMsg.Header.Get("X-DLQ-Original-Subject") != subject {
-			t.Errorf("expected original subject %s, got %s", subject, dlqMsg.Header.Get("X-DLQ-Original-Subject"))
+		if dlqMsg.Headers().Get("X-DLQ-Original-Subject") != subject {
+			t.Errorf("expected original subject %s, got %s", subject, dlqMsg.Headers().Get("X-DLQ-Original-Subject"))
 		}
 		if attempts := deliveryAttempts.Load(); attempts < 5 {
 			t.Errorf("expected at least 5 delivery attempts before DLQ, got %d", attempts)
@@ -122,29 +113,37 @@ func TestAC1A09_DLQAndDeduplication(t *testing.T) {
 	}
 }
 
-// AC-1A-07: Given uma chamada HTTP que vira chamada gRPC e depois publica no NATS embutido,
-// when o consumidor recebe, then os spans compartilham o mesmo trace_id e a cadeia de pais está correta.
+func TestAC1A09_DLQAndDeduplication(t *testing.T) {
+	_, url := natsx.StartEmbeddedServer(t)
+
+	nc, js, err := natsx.Connect(url)
+	if err != nil {
+		t.Fatalf("failed to connect to embedded nats: %v", err)
+	}
+	defer nc.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if err := natsx.InitStreams(ctx, js); err != nil {
+		t.Fatalf("failed to init streams: %v", err)
+	}
+
+	subject := "lgw.usage.recorded.v1"
+	runDeduplicationTest(ctx, t, js, subject)
+	runDLQTest(ctx, t, js, subject)
+}
+
 type traceBudgetServer struct {
 	budgetv1.UnimplementedBudgetServiceServer
 	js     jetstream.JetStream
 	tracer trace.Tracer
 }
 
-func (s *traceBudgetServer) Remaining(ctx context.Context, req *budgetv1.RemainingRequest) (*budgetv1.RemainingResponse, error) {
-	// Extract incoming gRPC metadata for tracing
-	md, _ := metadata.FromIncomingContext(ctx)
-	headerCarrier := make(propagation.HeaderCarrier)
-	for k, v := range md {
-		if len(v) > 0 {
-			headerCarrier.Set(k, v[0])
-		}
-	}
-	ctx = otel.GetTextMapPropagator().Extract(ctx, headerCarrier)
-
+func (s *traceBudgetServer) Remaining(ctx context.Context, _ *budgetv1.RemainingRequest) (*budgetv1.RemainingResponse, error) {
 	ctx, span := s.tracer.Start(ctx, "grpc.BudgetService/Remaining")
 	defer span.End()
 
-	// Publish event to NATS
 	_, err := natsx.Publish(ctx, s.js, "lgw.usage.recorded.v1", []byte(`{"event":"trace-test"}`), "")
 	if err != nil {
 		return nil, err
@@ -153,8 +152,43 @@ func (s *traceBudgetServer) Remaining(ctx context.Context, req *budgetv1.Remaini
 	return &budgetv1.RemainingResponse{DailyMicros: 999}, nil
 }
 
+func verifyTraceSpanChain(t *testing.T, spans []tracetest.SpanStub) {
+	t.Helper()
+	if len(spans) < 3 {
+		t.Fatalf("expected at least 3 spans, got %d: %v", len(spans), spans)
+	}
+
+	rootTraceID := spans[0].SpanContext.TraceID().String()
+	for _, s := range spans {
+		if s.SpanContext.TraceID().String() != rootTraceID {
+			t.Errorf("span %s has mismatching trace_id %s, expected %s",
+				s.Name, s.SpanContext.TraceID().String(), rootTraceID)
+		}
+	}
+
+	var serverSpan, consumerSpan tracetest.SpanStub
+	for _, s := range spans {
+		if s.Name == "grpc.BudgetService/Remaining" {
+			serverSpan = s
+		}
+		if s.Name == "nats.Consumer/Process" {
+			consumerSpan = s
+		}
+	}
+
+	if !serverSpan.Parent.SpanID().IsValid() {
+		t.Error("expected gRPC server span to have a valid parent span from client propagation")
+	}
+	if !consumerSpan.Parent.SpanID().IsValid() {
+		t.Error("expected NATS consumer span to have a valid parent span from NATS message header propagation")
+	}
+	if consumerSpan.Parent.SpanID() != serverSpan.SpanContext.SpanID() {
+		t.Errorf("expected NATS consumer parent span ID to match server span ID (%s), got %s",
+			serverSpan.SpanContext.SpanID().String(), consumerSpan.Parent.SpanID().String())
+	}
+}
+
 func TestAC1A07_EndToEndTracePropagation(t *testing.T) {
-	// Configure in-memory trace exporter
 	exporter := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
 	defer func() { _ = tp.Shutdown(context.Background()) }()
@@ -176,11 +210,10 @@ func TestAC1A07_EndToEndTracePropagation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := natsx.InitStreams(ctx, js); err != nil {
+	if err := natsx.InitStreams(ctx, js, natsx.WithMemoryStorage()); err != nil {
 		t.Fatalf("failed to init streams: %v", err)
 	}
 
-	// 1. Setup gRPC server
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("failed to listen on tcp: %v", err)
@@ -199,7 +232,6 @@ func TestAC1A07_EndToEndTracePropagation(t *testing.T) {
 	defer clientConn.Close()
 	grpcClient := budgetv1.NewBudgetServiceClient(clientConn)
 
-	// 2. Setup NATS Consumer
 	consumer, err := js.CreateOrUpdateConsumer(ctx, natsx.StreamUsage, jetstream.ConsumerConfig{
 		Durable:       "trace-consumer",
 		FilterSubject: "lgw.usage.recorded.v1",
@@ -224,33 +256,21 @@ func TestAC1A07_EndToEndTracePropagation(t *testing.T) {
 	}
 	defer consumeCtx.Stop()
 
-	// 3. Setup HTTP Handler
-	httpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		reqCtx, span := tracer.Start(r.Context(), "http.Handle/Inbound")
-		defer span.End()
-
-		// Inject trace context into gRPC outgoing metadata
-		md := metadata.New(nil)
-		headerCarrier := make(propagation.HeaderCarrier)
-		otel.GetTextMapPropagator().Inject(reqCtx, headerCarrier)
-		for k, v := range headerCarrier {
-			md.Set(k, v...)
-		}
-		grpcCtx := metadata.NewOutgoingContext(reqCtx, md)
-
-		_, err := grpcClient.Remaining(grpcCtx, &budgetv1.RemainingRequest{KeyId: "key-1"})
+	baseHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, err := grpcClient.Remaining(r.Context(), &budgetv1.RemainingRequest{KeyId: "key-1"})
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
 	})
+	httpHandler := platformotel.HTTPHandler(baseHandler, "http.Handle/Inbound")
 
 	ts := httptest.NewServer(httpHandler)
 	defer ts.Close()
 
-	// 4. Trigger HTTP request
-	resp, err := http.Get(ts.URL)
+	httpClient := platformotel.HTTPClient(nil)
+	resp, err := httpClient.Get(ts.URL)
 	if err != nil {
 		t.Fatalf("http request failed: %v", err)
 	}
@@ -260,33 +280,37 @@ func TestAC1A07_EndToEndTracePropagation(t *testing.T) {
 		t.Fatalf("expected 200 from http server, got %d: %s", resp.StatusCode, string(body))
 	}
 
-	// 5. Wait for NATS consumer to process
 	consumerSpanCollected.Wait()
+	verifyTraceSpanChain(t, exporter.GetSpans())
+}
 
-	// 6. Verify all spans in memory exporter
-	spans := exporter.GetSpans()
-	if len(spans) < 3 {
-		t.Fatalf("expected at least 3 spans, got %d: %v", len(spans), spans)
+func TestNATSX_InitStreams_Storage(t *testing.T) {
+	_, natsURL := natsx.StartEmbeddedServer(t)
+	nc, js, err := natsx.Connect(natsURL)
+	if err != nil {
+		t.Fatalf("connect failed: %v", err)
+	}
+	defer nc.Close()
+
+	ctx := context.Background()
+	if err := natsx.InitStreams(ctx, js); err != nil {
+		t.Fatalf("init default streams failed: %v", err)
+	}
+	info, err := js.Stream(ctx, natsx.StreamUsage)
+	if err != nil {
+		t.Fatalf("stream usage info failed: %v", err)
+	}
+	st, _ := info.Info(ctx)
+	if st.Config.Storage != jetstream.FileStorage {
+		t.Errorf("expected FileStorage by default, got %v", st.Config.Storage)
 	}
 
-	rootTraceID := spans[0].SpanContext.TraceID().String()
-	for _, s := range spans {
-		if s.SpanContext.TraceID().String() != rootTraceID {
-			t.Errorf("span %s has mismatching trace_id %s, expected %s",
-				s.Name, s.SpanContext.TraceID().String(), rootTraceID)
-		}
+	dlqInfo, err := js.Stream(ctx, natsx.StreamDLQ)
+	if err != nil {
+		t.Fatalf("stream dlq info failed: %v", err)
 	}
-
-	// Verify span names present
-	names := make(map[string]bool)
-	for _, s := range spans {
-		names[s.Name] = true
-	}
-
-	expectedNames := []string{"http.Handle/Inbound", "grpc.BudgetService/Remaining", "nats.Consumer/Process"}
-	for _, exp := range expectedNames {
-		if !names[exp] {
-			t.Errorf("missing expected span name %s in trace pipeline", exp)
-		}
+	dlqSt, _ := dlqInfo.Info(ctx)
+	if dlqSt.Config.Storage != jetstream.FileStorage {
+		t.Errorf("expected FileStorage for DLQ, got %v", dlqSt.Config.Storage)
 	}
 }

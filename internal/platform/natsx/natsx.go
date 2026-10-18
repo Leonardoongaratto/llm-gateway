@@ -3,6 +3,7 @@ package natsx
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -19,9 +20,28 @@ const (
 	StreamUsage  = "LGW_USAGE"
 	StreamBudget = "LGW_BUDGET"
 	StreamConfig = "LGW_CONFIG"
+	StreamDLQ    = "LGW_DLQ"
 
 	MaxDeliverDefault = 5
 )
+
+type StreamOption func(*streamOptions)
+
+type streamOptions struct {
+	storage jetstream.StorageType
+}
+
+func WithMemoryStorage() StreamOption {
+	return func(o *streamOptions) {
+		o.storage = jetstream.MemoryStorage
+	}
+}
+
+func WithFileStorage() StreamOption {
+	return func(o *streamOptions) {
+		o.storage = jetstream.FileStorage
+	}
+}
 
 // StartEmbeddedServer starts an in-process NATS server with JetStream for unit/integration tests.
 func StartEmbeddedServer(t testing.TB) (*server.Server, string) {
@@ -61,7 +81,9 @@ func Connect(url string, opts ...nats.Option) (*nats.Conn, jetstream.JetStream, 
 		nats.MaxReconnects(10),
 		nats.ReconnectWait(500 * time.Millisecond),
 	}
-	allOpts := append(defaultOpts, opts...)
+	allOpts := make([]nats.Option, 0, len(defaultOpts)+len(opts))
+	allOpts = append(allOpts, defaultOpts...)
+	allOpts = append(allOpts, opts...)
 
 	nc, err := nats.Connect(url, allOpts...)
 	if err != nil {
@@ -78,27 +100,39 @@ func Connect(url string, opts ...nats.Option) (*nats.Conn, jetstream.JetStream, 
 }
 
 // InitStreams creates the standard LGW streams idempotently.
-func InitStreams(ctx context.Context, js jetstream.JetStream) error {
+func InitStreams(ctx context.Context, js jetstream.JetStream, opts ...StreamOption) error {
+	options := streamOptions{storage: jetstream.FileStorage}
+	for _, opt := range opts {
+		opt(&options)
+	}
+
 	streamConfigs := []jetstream.StreamConfig{
 		{
 			Name:        StreamUsage,
 			Description: "LLM Gateway usage and provider fallback events",
 			Subjects:    []string{"lgw.usage.>", "lgw.provider.>"},
-			Storage:     jetstream.MemoryStorage,
+			Storage:     options.storage,
 			Duplicates:  2 * time.Minute,
 		},
 		{
 			Name:        StreamBudget,
 			Description: "LLM Gateway budget threshold events",
 			Subjects:    []string{"lgw.budget.>"},
-			Storage:     jetstream.MemoryStorage,
+			Storage:     options.storage,
 			Duplicates:  2 * time.Minute,
 		},
 		{
 			Name:        StreamConfig,
 			Description: "LLM Gateway configuration change events",
 			Subjects:    []string{"lgw.config.>"},
-			Storage:     jetstream.MemoryStorage,
+			Storage:     options.storage,
+			Duplicates:  2 * time.Minute,
+		},
+		{
+			Name:        StreamDLQ,
+			Description: "LLM Gateway Dead Letter Queue",
+			Subjects:    []string{"lgw.dlq.>"},
+			Storage:     options.storage,
 			Duplicates:  2 * time.Minute,
 		},
 	}
@@ -121,7 +155,6 @@ func Publish(ctx context.Context, js jetstream.JetStream, subject string, data [
 		msg.Header.Set("Nats-Msg-Id", msgID)
 	}
 
-	// Inject W3C Trace Context
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(http.Header(msg.Header)))
 
 	ack, err := js.PublishMsg(ctx, msg)
@@ -148,6 +181,38 @@ func DLQSubject(subject string) string {
 
 type MessageHandler func(ctx context.Context, msg jetstream.Msg) error
 
+func cloneNATSHeader(src nats.Header) nats.Header {
+	if src == nil {
+		return make(nats.Header)
+	}
+	dst := make(nats.Header, len(src))
+	for k, v := range src {
+		copied := make([]string, len(v))
+		copy(copied, v)
+		dst[k] = copied
+	}
+	return dst
+}
+
+func forwardToDLQ(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg, meta *jetstream.MsgMetadata, handlerErr error) {
+	dlqSubj := DLQSubject(msg.Subject())
+	dlqMsg := nats.NewMsg(dlqSubj)
+	dlqMsg.Data = msg.Data()
+
+	dlqHeader := cloneNATSHeader(msg.Headers())
+	dlqHeader.Set("X-DLQ-Original-Subject", msg.Subject())
+	dlqHeader.Set("X-DLQ-Reason", handlerErr.Error())
+	dlqHeader.Set("X-DLQ-Attempts", fmt.Sprintf("%d", meta.NumDelivered))
+	dlqMsg.Header = dlqHeader
+
+	if _, err := js.PublishMsg(ctx, dlqMsg); err != nil {
+		slog.WarnContext(ctx, "failed to publish message to DLQ", slog.Any("error", err), slog.String("subject", msg.Subject()))
+		_ = msg.NakWithDelay(50 * time.Millisecond)
+		return
+	}
+	_ = msg.Term()
+}
+
 // ConsumeWithDLQ consumes messages from a consumer, retrying with backoff up to maxDeliver,
 // and moving to DLQ when maxDeliver is exceeded.
 func ConsumeWithDLQ(ctx context.Context, js jetstream.JetStream, consumer jetstream.Consumer, handler MessageHandler, maxDeliver int) (jetstream.ConsumeContext, error) {
@@ -170,26 +235,11 @@ func ConsumeWithDLQ(ctx context.Context, js jetstream.JetStream, consumer jetstr
 			return
 		}
 
-		// If attempts exceed or equal maxDeliver, forward to DLQ and terminate
 		if int(meta.NumDelivered) >= maxDeliver {
-			dlqSubj := DLQSubject(msg.Subject())
-			// Publish directly to NATS on DLQ subject
-			dlqMsg := nats.NewMsg(dlqSubj)
-			dlqMsg.Data = msg.Data()
-			dlqMsg.Header = msg.Headers()
-			if dlqMsg.Header == nil {
-				dlqMsg.Header = nats.Header{}
-			}
-			dlqMsg.Header.Set("X-DLQ-Original-Subject", msg.Subject())
-			dlqMsg.Header.Set("X-DLQ-Reason", handlerErr.Error())
-			dlqMsg.Header.Set("X-DLQ-Attempts", fmt.Sprintf("%d", meta.NumDelivered))
-
-			_, _ = js.PublishMsg(ctx, dlqMsg)
-			_ = msg.Term()
+			forwardToDLQ(ctx, js, msg, meta, handlerErr)
 			return
 		}
 
-		// Otherwise, nack with backoff
 		backoff := time.Duration(meta.NumDelivered) * 5 * time.Millisecond
 		_ = msg.NakWithDelay(backoff)
 	})

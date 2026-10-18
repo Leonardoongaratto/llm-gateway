@@ -17,6 +17,41 @@ func (e *MissingEnvError) Error() string {
 	return fmt.Sprintf("missing required environment variables: %s", strings.Join(e.Missing, ", "))
 }
 
+func parseEnvTag(prefix string, tag string) (envKey string, isRequired bool) {
+	parts := strings.Split(tag, ",")
+	envKey = prefix + parts[0]
+	for _, p := range parts[1:] {
+		if strings.TrimSpace(p) == "required" {
+			isRequired = true
+		}
+	}
+	return envKey, isRequired
+}
+
+func resolveEnvValue(prefix string, field reflect.StructField) (string, string, bool) {
+	tag := field.Tag.Get("env")
+	if tag == "" {
+		return "", "", false
+	}
+
+	envKey, isRequired := parseEnvTag(prefix, tag)
+	envVal, exists := os.LookupEnv(envKey)
+	defaultVal := field.Tag.Get("default")
+
+	if !exists || strings.TrimSpace(envVal) == "" {
+		switch {
+		case defaultVal != "":
+			return defaultVal, "", true
+		case isRequired:
+			return "", envKey, false
+		default:
+			return "", "", false
+		}
+	}
+
+	return envVal, "", true
+}
+
 // LoadFromEnv loads environment variables with the given prefix into a new instance of T.
 func LoadFromEnv[T any](prefix string) (*T, error) {
 	var cfg T
@@ -27,37 +62,18 @@ func LoadFromEnv[T any](prefix string) (*T, error) {
 
 	for i := 0; i < typ.NumField(); i++ {
 		field := typ.Field(i)
-		fieldVal := val.Field(i)
-		tag := field.Tag.Get("env")
-		if tag == "" {
+		envVal, missingKey, ok := resolveEnvValue(prefix, field)
+		if missingKey != "" {
+			missing = append(missing, missingKey)
+			continue
+		}
+		if !ok {
 			continue
 		}
 
-		parts := strings.Split(tag, ",")
-		envKey := prefix + parts[0]
-		isRequired := false
-		for _, p := range parts[1:] {
-			if strings.TrimSpace(p) == "required" {
-				isRequired = true
-			}
-		}
-
-		envVal, exists := os.LookupEnv(envKey)
-		defaultVal := field.Tag.Get("default")
-
-		if !exists || strings.TrimSpace(envVal) == "" {
-			if defaultVal != "" {
-				envVal = defaultVal
-			} else if isRequired {
-				missing = append(missing, envKey)
-				continue
-			} else {
-				continue
-			}
-		}
-
-		if err := setFieldValue(fieldVal, envVal); err != nil {
-			return nil, fmt.Errorf("failed to parse environment variable %s: %w", envKey, err)
+		if err := setFieldValue(val.Field(i), envVal); err != nil {
+			tagParts := strings.Split(field.Tag.Get("env"), ",")
+			return nil, fmt.Errorf("failed to parse environment variable %s%s: %w", prefix, tagParts[0], err)
 		}
 	}
 

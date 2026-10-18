@@ -48,8 +48,8 @@ High-performance AI Gateway with hard budgets, fallbacks, event streaming, and u
 ## Technical Stack & Libraries
 
 - **Language:** Go 1.27
-- **Protobuf & RPC:** Protobuf v3 with `bufbuild/buf`, `google.golang.org/grpc` (v1.71.0) and `google.golang.org/protobuf` (v1.36.5)
-- **Messaging:** `github.com/nats-io/nats.go` (v1.39.1) and embedded `github.com/nats-io/nats-server/v2` (v2.10.26) for testing
+- **Protobuf & RPC:** Protobuf v3 with `bufbuild/buf`, `google.golang.org/grpc` (v1.84.0) and `google.golang.org/protobuf` (v1.36.12)
+- **Messaging:** `github.com/nats-io/nats.go` (v1.54.0) and embedded `github.com/nats-io/nats-server/v2` (v2.15.1) for testing
 - **Databases:** `modernc.org/sqlite` (pure Go / no CGO) and `github.com/jackc/pgx/v5` (PostgreSQL)
 - **Observability:** OpenTelemetry Go (`go.opentelemetry.io/otel`), OTLP trace exporter, and Prometheus metrics exporter (`go.opentelemetry.io/otel/exporters/prometheus`)
 - **Identifiers:** UUIDv7 (`github.com/google/uuid`) for time-ordered request and reservation IDs

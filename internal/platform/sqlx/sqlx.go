@@ -12,34 +12,29 @@ import (
 	"testing"
 	"time"
 
+	// Register pgx driver for database/sql PostgreSQL support.
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
-// OpenSQLite opens a SQLite database with WAL journal mode, 5s busy timeout, and foreign keys enabled.
-func OpenSQLite(dsn string) (*sql.DB, error) {
+func buildSQLiteDSN(dsn string) string {
 	if dsn == "" {
 		dsn = "file::memory:?cache=shared"
 	}
+	separator := "?"
+	if strings.Contains(dsn, "?") {
+		separator = "&"
+	}
+	return dsn + separator + "_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
+}
 
-	db, err := sql.Open("sqlite", dsn)
+// OpenSQLite opens a SQLite database with WAL journal mode, 5s busy timeout, and foreign keys enabled.
+func OpenSQLite(dsn string) (*sql.DB, error) {
+	fullDSN := buildSQLiteDSN(dsn)
+	db, err := sql.Open("sqlite", fullDSN)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite: %w", err)
 	}
-
-	// Apply pragmatic defaults
-	pragmas := []string{
-		"PRAGMA journal_mode = WAL;",
-		"PRAGMA busy_timeout = 5000;",
-		"PRAGMA foreign_keys = ON;",
-	}
-	for _, pragma := range pragmas {
-		if _, err := db.Exec(pragma); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("failed to execute %s: %w", pragma, err)
-		}
-	}
-
 	return db, nil
 }
 
@@ -69,6 +64,72 @@ func Open(driver, dsn string) (*sql.DB, error) {
 	}
 }
 
+func listMigrationFiles(fsys fs.FS, dir string) ([]string, error) {
+	entries, err := fs.ReadDir(fsys, dir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read migrations dir %s: %w", dir, err)
+	}
+
+	var files []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			files = append(files, entry.Name())
+		}
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+func getAppliedMigrations(ctx context.Context, db *sql.DB) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, "SELECT version FROM schema_migrations")
+	if err != nil {
+		return nil, fmt.Errorf("failed to query applied migrations: %w", err)
+	}
+	defer rows.Close()
+
+	applied := make(map[string]bool)
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		applied[v] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return applied, nil
+}
+
+func applySingleMigration(ctx context.Context, db *sql.DB, fsys fs.FS, dir, filename string) error {
+	filePath := filepath.ToSlash(filepath.Join(dir, filename))
+	content, err := fs.ReadFile(fsys, filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read migration file %s: %w", filename, err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin tx for %s: %w", filename, err)
+	}
+
+	if _, err := tx.ExecContext(ctx, string(content)); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("failed to apply migration %s: %w", filename, err)
+	}
+
+	insertSQL := "INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2)"
+	if _, err := tx.ExecContext(ctx, insertSQL, filename, time.Now().UTC()); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("failed to record migration %s: %w", filename, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit migration %s: %w", filename, err)
+	}
+	return nil
+}
+
 // Migrate executes all .sql migration files found in fsys at dir in alphabetical order.
 // Executing Migrate twice is idempotent.
 func Migrate(ctx context.Context, db *sql.DB, fsys fs.FS, dir string) error {
@@ -81,73 +142,22 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		return fmt.Errorf("failed to create schema_migrations table: %w", err)
 	}
 
-	entries, err := fs.ReadDir(fsys, dir)
+	files, err := listMigrationFiles(fsys, dir)
 	if err != nil {
-		return fmt.Errorf("failed to read migrations dir %s: %w", dir, err)
-	}
-
-	var files []string
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
-			files = append(files, entry.Name())
-		}
-	}
-	sort.Strings(files)
-
-	// Query applied migrations
-	rows, err := db.QueryContext(ctx, "SELECT version FROM schema_migrations")
-	if err != nil {
-		return fmt.Errorf("failed to query applied migrations: %w", err)
-	}
-	defer rows.Close()
-
-	applied := make(map[string]bool)
-	for rows.Next() {
-		var v string
-		if err := rows.Scan(&v); err != nil {
-			return err
-		}
-		applied[v] = true
-	}
-	if err := rows.Err(); err != nil {
 		return err
 	}
 
-	// Apply pending migrations
+	applied, err := getAppliedMigrations(ctx, db)
+	if err != nil {
+		return err
+	}
+
 	for _, filename := range files {
 		if applied[filename] {
 			continue
 		}
-
-		filePath := filepath.ToSlash(filepath.Join(dir, filename))
-		content, err := fs.ReadFile(fsys, filePath)
-		if err != nil {
-			return fmt.Errorf("failed to read migration file %s: %w", filename, err)
-		}
-
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("failed to begin tx for %s: %w", filename, err)
-		}
-
-		if _, err := tx.ExecContext(ctx, string(content)); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("failed to apply migration %s: %w", filename, err)
-		}
-
-		insertSQL := "INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2)"
-		// SQLite standard driver accepts ? or $1
-		if _, err := tx.ExecContext(ctx, insertSQL, filename, time.Now().UTC()); err != nil {
-			// Fallback for sqlite if $1 is not supported in some driver configs
-			fallbackSQL := "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)"
-			if _, err2 := tx.ExecContext(ctx, fallbackSQL, filename, time.Now().UTC()); err2 != nil {
-				_ = tx.Rollback()
-				return fmt.Errorf("failed to record migration %s: %w", filename, err2)
-			}
-		}
-
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("failed to commit migration %s: %w", filename, err)
+		if err := applySingleMigration(ctx, db, fsys, dir, filename); err != nil {
+			return err
 		}
 	}
 
@@ -159,7 +169,6 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 func RunContractTest(t *testing.T, fsys fs.FS, migrationDir string, testFn func(t *testing.T, db *sql.DB, driver string)) {
 	t.Helper()
 
-	// 1. SQLite contract test
 	t.Run("SQLite", func(t *testing.T) {
 		dbPath := filepath.Join(t.TempDir(), "contract.db")
 		db, err := OpenSQLite(dbPath)
@@ -169,22 +178,18 @@ func RunContractTest(t *testing.T, fsys fs.FS, migrationDir string, testFn func(
 		defer db.Close()
 
 		ctx := context.Background()
-		// Run 1: apply
 		if err := Migrate(ctx, db, fsys, migrationDir); err != nil {
-			t.Fatalf("first migration run failed: %v", err)
+			t.Fatalf("migration run 1 failed: %v", err)
 		}
-		// Run 2: idempotent check
 		if err := Migrate(ctx, db, fsys, migrationDir); err != nil {
-			t.Fatalf("second migration run failed (idempotency check): %v", err)
+			t.Fatalf("migration run 2 (idempotency) failed: %v", err)
 		}
 
 		testFn(t, db, "sqlite")
 	})
 
-	// 2. PostgreSQL contract test
 	pgDSN := os.Getenv("LGW_TEST_PG_DSN")
 	if pgDSN == "" {
-		t.Log("skipping postgres contract test (LGW_TEST_PG_DSN not set)")
 		return
 	}
 
@@ -197,10 +202,10 @@ func RunContractTest(t *testing.T, fsys fs.FS, migrationDir string, testFn func(
 
 		ctx := context.Background()
 		if err := Migrate(ctx, db, fsys, migrationDir); err != nil {
-			t.Fatalf("first postgres migration run failed: %v", err)
+			t.Fatalf("pg migration run 1 failed: %v", err)
 		}
 		if err := Migrate(ctx, db, fsys, migrationDir); err != nil {
-			t.Fatalf("second postgres migration run failed (idempotency check): %v", err)
+			t.Fatalf("pg migration run 2 (idempotency) failed: %v", err)
 		}
 
 		testFn(t, db, "postgres")

@@ -117,9 +117,8 @@ func TestAC1A08_RetryAndDeadline(t *testing.T) {
 		t.Errorf("expected DeadlineExceeded code, got: %v", err)
 	}
 
-	// 50ms deadline + 15ms margin = 65ms
-	if elapsed > 65*time.Millisecond {
-		t.Errorf("expected call to fail within deadline + 15ms (<= 65ms), took %v", elapsed)
+	if elapsed > 60*time.Millisecond {
+		t.Errorf("expected call to fail within deadline + 10ms (<= 60ms), took %v", elapsed)
 	}
 }
 

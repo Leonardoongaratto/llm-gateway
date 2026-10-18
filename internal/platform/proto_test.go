@@ -26,6 +26,13 @@ func findRepoRoot(t *testing.T) string {
 	}
 }
 
+func findPowerShell() string {
+	if _, err := exec.LookPath("pwsh"); err == nil {
+		return "pwsh"
+	}
+	return "powershell"
+}
+
 // AC-1A-01: Given os .proto, when buf lint e buf generate rodam, then o lint passa e o gen/ regenerado não difere do versionado.
 func TestAC1A01_BufLintAndGenerate(t *testing.T) {
 	root := findRepoRoot(t)
@@ -50,9 +57,16 @@ func TestAC1A01_BufLintAndGenerate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gen/ differs from versioned state: %v\nDiff: %s", err, string(out))
 	}
+
+	untrackedCmd := exec.Command("git", "ls-files", "--others", "--exclude-standard", "gen")
+	untrackedCmd.Dir = root
+	out, err = untrackedCmd.CombinedOutput()
+	if err != nil || len(strings.TrimSpace(string(out))) > 0 {
+		t.Fatalf("untracked files found in gen/: %s", string(out))
+	}
 }
 
-// AC-1A-02: Given uma cópia temporária do proto com o tipo de um campo alterado, when buf breaking --against o estado atual, then o comando falha.
+// AC-1A-02: Given uma cópia temporária do proto com o tipo de um campo alterado, when proto.ps1 -Against o estado alterado roda, then o comando falha.
 func TestAC1A02_BufBreakingDetection(t *testing.T) {
 	root := findRepoRoot(t)
 	tempDir := t.TempDir()
@@ -84,15 +98,16 @@ func TestAC1A02_BufBreakingDetection(t *testing.T) {
 		t.Fatalf("failed to write modified proto: %v", err)
 	}
 
-	cmd := exec.Command("buf", "breaking", tempDir, "--against", root)
+	scriptPath := filepath.Join(root, "scripts", "proto.ps1")
+	cmd := exec.Command(findPowerShell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-Against", tempDir)
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if err == nil {
-		t.Fatalf("expected buf breaking to fail, but it succeeded. Output: %s", string(out))
+		t.Fatalf("expected proto.ps1 -Against to fail on breaking change, but it succeeded. Output: %s", string(out))
 	}
 
-	if !strings.Contains(string(out), "changed type from \"int64\" to \"string\"") {
-		t.Fatalf("expected output to mention type change, got: %s", string(out))
+	if !strings.Contains(string(out), "changed type") || !strings.Contains(string(out), "max_micros") {
+		t.Fatalf("expected output to mention type change for max_micros, got: %s", string(out))
 	}
 }
 
