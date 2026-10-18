@@ -55,3 +55,15 @@ func TestOTel_InitAndPrometheusMetrics(t *testing.T) {
 		t.Errorf("expected prometheus metrics to contain test_requests_total, got: %s", body)
 	}
 }
+
+func TestOTel_WithEndpoint(t *testing.T) {
+	ctx := context.Background()
+	provider, err := otel.Init(ctx, otel.Config{
+		ServiceName:  "endpoint-service",
+		OTelEndpoint: "127.0.0.1:4318",
+	})
+	if err != nil {
+		t.Fatalf("failed to init otel with endpoint: %v", err)
+	}
+	defer func() { _ = provider.Shutdown(ctx) }()
+}

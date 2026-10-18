@@ -55,3 +55,22 @@ func TestAC1A10_MigrationsAndContractSuite(t *testing.T) {
 		}
 	})
 }
+
+func TestSQLX_Open(t *testing.T) {
+	// SQLite via Open
+	db, err := sqlx.Open("sqlite", "")
+	if err != nil {
+		t.Fatalf("failed to open sqlite: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Ping(); err != nil {
+		t.Fatalf("failed to ping sqlite: %v", err)
+	}
+
+	// Unsupported driver
+	_, err = sqlx.Open("unknown_driver", "dsn")
+	if err == nil {
+		t.Fatal("expected error for unsupported driver, got nil")
+	}
+}

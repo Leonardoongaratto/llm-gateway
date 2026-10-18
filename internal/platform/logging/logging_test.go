@@ -84,3 +84,27 @@ func TestLogging_RedactionAndTraceInjection_AC1A06(t *testing.T) {
 		t.Errorf("expected headers.public_header to remain safe-value, got %v", headers["public_header"])
 	}
 }
+
+func TestLogging_HandlerMethodsAndLevels(t *testing.T) {
+	var buf bytes.Buffer
+	logger := logging.New(&buf, "debug")
+
+	if !logger.Handler().Enabled(context.Background(), slog.LevelDebug) {
+		t.Error("expected debug level to be enabled")
+	}
+
+	subLogger := logger.WithGroup("mygroup").With("extra", "value")
+	subLogger.DebugContext(context.Background(), "debug msg", slog.String("password", "secret"))
+
+	var entry map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
+		t.Fatalf("failed to parse log json: %v", err)
+	}
+
+	levels := []string{"warn", "warning", "error", "unknown"}
+	for _, lvl := range levels {
+		var b bytes.Buffer
+		l := logging.New(&b, lvl)
+		l.Info("test")
+	}
+}

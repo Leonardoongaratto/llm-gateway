@@ -3,7 +3,7 @@ package grpcx
 import (
 	"context"
 	"log/slog"
-	"math/rand/v2"
+	rand "math/rand/v2"
 	"runtime/debug"
 	"time"
 
