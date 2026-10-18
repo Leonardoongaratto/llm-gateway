@@ -67,3 +67,31 @@ func TestOTel_WithEndpoint(t *testing.T) {
 	}
 	defer func() { _ = provider.Shutdown(ctx) }()
 }
+
+func TestOTel_HTTPHelpers(t *testing.T) {
+	innerHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := otel.HTTPHandler(innerHandler, "test-operation")
+	if handler == nil {
+		t.Fatal("expected non-nil HTTPHandler")
+	}
+
+	transport := otel.HTTPTransport(nil)
+	if transport == nil {
+		t.Fatal("expected non-nil HTTPTransport with nil base")
+	}
+
+	client := otel.HTTPClient(nil)
+	if client == nil || client.Transport == nil {
+		t.Fatal("expected non-nil HTTPClient with configured transport")
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}

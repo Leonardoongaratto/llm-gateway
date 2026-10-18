@@ -65,6 +65,12 @@ func TestSQLX_Open(t *testing.T) {
 		t.Fatalf("failed to ping sqlite: %v", err)
 	}
 
+	pgDB, err := sqlx.Open("postgres", "postgres://127.0.0.1:5432/nonexistent?sslmode=disable")
+	if err != nil {
+		t.Fatalf("failed to open postgres driver: %v", err)
+	}
+	defer pgDB.Close()
+
 	_, err = sqlx.Open("unknown_driver", "dsn")
 	if err == nil {
 		t.Fatal("expected error for unsupported driver, got nil")

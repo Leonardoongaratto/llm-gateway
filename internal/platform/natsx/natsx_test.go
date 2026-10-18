@@ -293,7 +293,7 @@ func TestNATSX_InitStreams_Storage(t *testing.T) {
 	defer nc.Close()
 
 	ctx := context.Background()
-	if err := natsx.InitStreams(ctx, js); err != nil {
+	if err := natsx.InitStreams(ctx, js, natsx.WithFileStorage()); err != nil {
 		t.Fatalf("init default streams failed: %v", err)
 	}
 	info, err := js.Stream(ctx, natsx.StreamUsage)
