@@ -78,9 +78,20 @@ jobs:
           git diff --exit-code gen/
           test -z "$(git status --porcelain gen/)"
 
+      - name: Check if main branch has protobuf definitions
+        id: check_main_proto
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch origin main --depth=1
+          if [ -n "$(git ls-tree origin/main proto/)" ]; then
+            echo "has_proto=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_proto=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Buf Breaking Change Detection
         uses: bufbuild/buf-breaking-action@v1
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.check_main_proto.outputs.has_proto == 'true'
         with:
           against: 'https://github.com/Leonardoongaratto/llm-gateway.git#branch=main'
 
