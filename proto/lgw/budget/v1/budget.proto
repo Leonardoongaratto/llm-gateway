@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package lgw.budget.v1;
+
+option go_package = "github.com/Leonardoongaratto/llm-gateway/gen/lgw/budget/v1;budgetv1";
+
+service BudgetService {
+  rpc Reserve(ReserveRequest) returns (ReserveResponse);
+  rpc Settle(SettleRequest) returns (SettleResponse);
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
+  rpc Remaining(RemainingRequest) returns (RemainingResponse);
+}
+
+message ReserveRequest {
+  string key_id = 1;
+  int64 max_micros = 2;
+  string request_id = 3;
+}
+
+message ReserveResponse {
+  string reservation_id = 1;
+  int64 remaining_micros = 2;
+}
+
+message SettleRequest {
+  string reservation_id = 1;
+  int64 actual_micros = 2;
+}
+
+message SettleResponse {}
+
+message ReleaseRequest {
+  string reservation_id = 1;
+}
+
+message ReleaseResponse {}
+
+message RemainingRequest {
+  string key_id = 1;
+}
+
+message RemainingResponse {
+  int64 daily_micros = 1;
+  int64 monthly_micros = 2;
+}
+
+message ReserveDenial {
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    BUDGET_EXCEEDED = 1;
+    RATE_LIMITED = 2;
+    UNKNOWN_KEY = 3;
+  }
+  Reason reason = 1;
+  int64 retry_after_seconds = 2;
+}
