@@ -8,6 +8,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,6 +22,7 @@ const (
 
 type Config struct {
 	GatewayURL   string
+	GatewayURLs  []string
 	ControlURL   string
 	UsageURL     string
 	BudgetURL    string
@@ -34,10 +36,11 @@ type Handler struct {
 	client       *http.Client
 	maxBodyBytes int64
 
-	gatewayProxy *httputil.ReverseProxy
-	controlProxy *httputil.ReverseProxy
-	usageProxy   *httputil.ReverseProxy
-	budgetProxy  *httputil.ReverseProxy
+	gatewayProxies []*httputil.ReverseProxy
+	rrCounter      atomic.Uint64
+	controlProxy   *httputil.ReverseProxy
+	usageProxy     *httputil.ReverseProxy
+	budgetProxy    *httputil.ReverseProxy
 }
 
 func createReverseProxy(targetURL string) (*httputil.ReverseProxy, error) {
@@ -78,10 +81,23 @@ func createReverseProxy(targetURL string) (*httputil.ReverseProxy, error) {
 }
 
 func New(cfg Config) (*Handler, error) {
-	gwProxy, err := createReverseProxy(cfg.GatewayURL)
-	if err != nil {
-		return nil, fmt.Errorf("gateway proxy: %w", err)
+	gwURLs := cfg.GatewayURLs
+	if len(gwURLs) == 0 && cfg.GatewayURL != "" {
+		gwURLs = []string{cfg.GatewayURL}
 	}
+	if len(gwURLs) == 0 {
+		return nil, errors.New("at least one gateway URL is required")
+	}
+
+	gwProxies := make([]*httputil.ReverseProxy, 0, len(gwURLs))
+	for _, u := range gwURLs {
+		rp, err := createReverseProxy(u)
+		if err != nil {
+			return nil, fmt.Errorf("gateway proxy (%s): %w", u, err)
+		}
+		gwProxies = append(gwProxies, rp)
+	}
+
 	ctrlProxy, err := createReverseProxy(cfg.ControlURL)
 	if err != nil {
 		return nil, fmt.Errorf("control proxy: %w", err)
@@ -106,13 +122,13 @@ func New(cfg Config) (*Handler, error) {
 	}
 
 	return &Handler{
-		cfg:          cfg,
-		client:       client,
-		maxBodyBytes: maxBytes,
-		gatewayProxy: gwProxy,
-		controlProxy: ctrlProxy,
-		usageProxy:   usgProxy,
-		budgetProxy:  bdgProxy,
+		cfg:            cfg,
+		client:         client,
+		maxBodyBytes:   maxBytes,
+		gatewayProxies: gwProxies,
+		controlProxy:   ctrlProxy,
+		usageProxy:     usgProxy,
+		budgetProxy:    bdgProxy,
 	}, nil
 }
 
@@ -145,7 +161,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "/health":
 		h.handleHealth(w, r)
 	case strings.HasPrefix(path, "/v1/"):
-		h.gatewayProxy.ServeHTTP(w, r)
+		idx := h.rrCounter.Add(1) % uint64(len(h.gatewayProxies))
+		h.gatewayProxies[idx].ServeHTTP(w, r)
 	case strings.HasPrefix(path, "/admin/keys"),
 		strings.HasPrefix(path, "/admin/pricing"),
 		strings.HasPrefix(path, "/admin/models"):

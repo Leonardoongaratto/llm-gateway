@@ -47,8 +47,13 @@ func (h *Handler) checkServiceHealth(ctx context.Context, target checkTarget) st
 }
 
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
+	gwBaseURL := h.cfg.GatewayURL
+	if gwBaseURL == "" && len(h.cfg.GatewayURLs) > 0 {
+		gwBaseURL = h.cfg.GatewayURLs[0]
+	}
+
 	targets := []checkTarget{
-		{name: "gateway", baseURL: h.cfg.GatewayURL},
+		{name: "gateway", baseURL: gwBaseURL},
 		{name: "control", baseURL: h.cfg.ControlURL},
 		{name: "budget", baseURL: h.cfg.BudgetURL},
 		{name: "usage", baseURL: h.cfg.UsageURL},

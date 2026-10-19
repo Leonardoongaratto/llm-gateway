@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Leonardoongaratto/llm-gateway/internal/edge/proxy"
@@ -389,4 +390,45 @@ func TestProxy_Dashboard_SPA_AC1F03(t *testing.T) {
 		}
 		assertResponseContains(t, noWebHandler, "/dashboard", http.StatusNotFound, "")
 	})
+}
+
+func TestProxy_MultipleGateways_RoundRobin(t *testing.T) {
+	var count1, count2 atomic.Int64
+
+	gw1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		count1.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"gw":1}`))
+	}))
+	defer gw1.Close()
+
+	gw2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		count2.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"gw":2}`))
+	}))
+	defer gw2.Close()
+
+	handler, err := proxy.New(proxy.Config{
+		GatewayURLs: []string{gw1.URL, gw2.URL},
+		ControlURL:  gw1.URL,
+		UsageURL:    gw1.URL,
+		BudgetURL:   gw1.URL,
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d failed with status %d", i, rec.Code)
+		}
+	}
+
+	if count1.Load() != 5 || count2.Load() != 5 {
+		t.Errorf("expected 5 hits each, got gw1=%d, gw2=%d", count1.Load(), count2.Load())
+	}
 }
