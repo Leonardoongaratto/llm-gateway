@@ -1,0 +1,291 @@
+{
+  "period_days": 30,
+  "start_date": "2026-09-17",
+  "end_date": "2026-10-17",
+  "spend_micros": 137090585,
+  "prev_spend_micros": 141859142,
+  "projected_month_micros": 136013816,
+  "daily": [
+    {
+      "date": "2026-09-17",
+      "spend_micros": 4496709,
+      "requests": 4,
+      "tokens": 565080
+    },
+    {
+      "date": "2026-09-18",
+      "spend_micros": 4491745,
+      "requests": 4,
+      "tokens": 564544
+    },
+    {
+      "date": "2026-09-19",
+      "spend_micros": 4486785,
+      "requests": 4,
+      "tokens": 564008
+    },
+    {
+      "date": "2026-09-20",
+      "spend_micros": 4481820,
+      "requests": 4,
+      "tokens": 563472
+    },
+    {
+      "date": "2026-09-21",
+      "spend_micros": 4476860,
+      "requests": 4,
+      "tokens": 562936
+    },
+    {
+      "date": "2026-09-22",
+      "spend_micros": 4471897,
+      "requests": 4,
+      "tokens": 562400
+    },
+    {
+      "date": "2026-09-23",
+      "spend_micros": 4466937,
+      "requests": 4,
+      "tokens": 561864
+    },
+    {
+      "date": "2026-09-24",
+      "spend_micros": 4461971,
+      "requests": 4,
+      "tokens": 561328
+    },
+    {
+      "date": "2026-09-25",
+      "spend_micros": 4457012,
+      "requests": 4,
+      "tokens": 560792
+    },
+    {
+      "date": "2026-09-26",
+      "spend_micros": 4452047,
+      "requests": 4,
+      "tokens": 560256
+    },
+    {
+      "date": "2026-09-27",
+      "spend_micros": 4447091,
+      "requests": 4,
+      "tokens": 559720
+    },
+    {
+      "date": "2026-09-28",
+      "spend_micros": 4442125,
+      "requests": 4,
+      "tokens": 559184
+    },
+    {
+      "date": "2026-09-29",
+      "spend_micros": 4437163,
+      "requests": 4,
+      "tokens": 558648
+    },
+    {
+      "date": "2026-09-30",
+      "spend_micros": 4432201,
+      "requests": 4,
+      "tokens": 558112
+    },
+    {
+      "date": "2026-10-01",
+      "spend_micros": 4427241,
+      "requests": 4,
+      "tokens": 557576
+    },
+    {
+      "date": "2026-10-02",
+      "spend_micros": 4422276,
+      "requests": 4,
+      "tokens": 557040
+    },
+    {
+      "date": "2026-10-03",
+      "spend_micros": 4417315,
+      "requests": 4,
+      "tokens": 556504
+    },
+    {
+      "date": "2026-10-04",
+      "spend_micros": 4412352,
+      "requests": 4,
+      "tokens": 555968
+    },
+    {
+      "date": "2026-10-05",
+      "spend_micros": 4407393,
+      "requests": 4,
+      "tokens": 555432
+    },
+    {
+      "date": "2026-10-06",
+      "spend_micros": 4402427,
+      "requests": 4,
+      "tokens": 554896
+    },
+    {
+      "date": "2026-10-07",
+      "spend_micros": 4397468,
+      "requests": 4,
+      "tokens": 554360
+    },
+    {
+      "date": "2026-10-08",
+      "spend_micros": 4392503,
+      "requests": 4,
+      "tokens": 553824
+    },
+    {
+      "date": "2026-10-09",
+      "spend_micros": 4387544,
+      "requests": 4,
+      "tokens": 553288
+    },
+    {
+      "date": "2026-10-10",
+      "spend_micros": 4382578,
+      "requests": 4,
+      "tokens": 552752
+    },
+    {
+      "date": "2026-10-11",
+      "spend_micros": 4377618,
+      "requests": 4,
+      "tokens": 552216
+    },
+    {
+      "date": "2026-10-12",
+      "spend_micros": 4372656,
+      "requests": 4,
+      "tokens": 551680
+    },
+    {
+      "date": "2026-10-13",
+      "spend_micros": 4367695,
+      "requests": 4,
+      "tokens": 551144
+    },
+    {
+      "date": "2026-10-14",
+      "spend_micros": 4362730,
+      "requests": 4,
+      "tokens": 550608
+    },
+    {
+      "date": "2026-10-15",
+      "spend_micros": 4357770,
+      "requests": 5,
+      "tokens": 17350072
+    },
+    {
+      "date": "2026-10-16",
+      "spend_micros": 4352806,
+      "requests": 4,
+      "tokens": 549536
+    },
+    {
+      "date": "2026-10-17",
+      "spend_micros": 4347850,
+      "requests": 4,
+      "tokens": 549000
+    }
+  ],
+  "by_model": [
+    {
+      "model": "claude-3-opus-20240229",
+      "spend_micros": 101325690,
+      "requests": 31,
+      "tokens": 4340310
+    },
+    {
+      "model": "claude-3-5-sonnet-20241022",
+      "spend_micros": 19614117,
+      "requests": 31,
+      "tokens": 4247310
+    },
+    {
+      "model": "gpt-4o",
+      "spend_micros": 15210317,
+      "requests": 31,
+      "tokens": 4293810
+    },
+    {
+      "model": "gpt-4o-mini",
+      "spend_micros": 940461,
+      "requests": 31,
+      "tokens": 4386810
+    }
+  ],
+  "by_key": [
+    {
+      "key_id": "key-mobile-api",
+      "spend_micros": 101325690,
+      "requests": 31,
+      "tokens": 4340310
+    },
+    {
+      "key_id": "key-prod-backend",
+      "spend_micros": 20554578,
+      "requests": 62,
+      "tokens": 8634120
+    },
+    {
+      "key_id": "key-analytics-worker",
+      "spend_micros": 15210317,
+      "requests": 31,
+      "tokens": 4293810
+    }
+  ],
+  "by_provider": [
+    {
+      "provider": "anthropic",
+      "spend_micros": 120939807,
+      "requests": 63,
+      "tokens": 25387620
+    },
+    {
+      "provider": "openai",
+      "spend_micros": 16150778,
+      "requests": 62,
+      "tokens": 8680620
+    }
+  ],
+  "subscriptions": [
+    {
+      "id": "sub-1",
+      "name": "Claude Code Pro",
+      "provider": "anthropic",
+      "monthly_cost_micros": 20000000,
+      "equivalent_value_micros": 84000000,
+      "aproveitamento": 4.2
+    }
+  ],
+  "reconciliation": {
+    "by_provider": {
+      "anthropic": {
+        "provider": "anthropic",
+        "gateway_spend_micros": 120939807,
+        "org_spend_micros": 0,
+        "overlap_micros": 0,
+        "discrepancy_micros": 0,
+        "reconciled_spend_micros": 120939807
+      },
+      "openai": {
+        "provider": "openai",
+        "gateway_spend_micros": 16150778,
+        "org_spend_micros": 0,
+        "overlap_micros": 0,
+        "discrepancy_micros": 0,
+        "reconciled_spend_micros": 16150778
+      }
+    },
+    "total_gateway_micros": 137090585,
+    "total_org_micros": 0,
+    "total_overlap_micros": 0,
+    "total_discrepancy_micros": 0,
+    "total_reconciled_micros": 137090585
+  }
+}

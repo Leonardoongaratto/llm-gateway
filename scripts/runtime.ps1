@@ -137,6 +137,13 @@ try {
     }
     Write-Host "  [OK] budget: configured limits for virtual key $($createdKey.id)"
 
+    $usageSummaryCode = & curl.exe -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer runtime-admin-token" "http://127.0.0.1:8791/admin/summary"
+    if ($usageSummaryCode -ne "200") {
+        Write-Error "usage GET /admin/summary failed with HTTP $usageSummaryCode"
+        exit 1
+    }
+    Write-Host "  [OK] usage: GET /admin/summary -> HTTP 200"
+
     Write-Host "==> Starting gateway with control, budget, and fake upstream..."
     $env:LGW_CONTROL_ADDR = "127.0.0.1:9102"
     $env:LGW_BUDGET_ADDR = "127.0.0.1:9101"
