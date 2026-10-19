@@ -2,31 +2,40 @@ package main
 
 import (
 	"context"
-	"errors"
+	"database/sql"
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	controlv1 "github.com/Leonardoongaratto/llm-gateway/gen/lgw/control/v1"
+	"github.com/Leonardoongaratto/llm-gateway/internal/control/grpcapi"
+	"github.com/Leonardoongaratto/llm-gateway/internal/control/httpapi"
+	"github.com/Leonardoongaratto/llm-gateway/internal/control/outbox"
+	"github.com/Leonardoongaratto/llm-gateway/internal/control/store"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/config"
-	"github.com/Leonardoongaratto/llm-gateway/internal/platform/grpcx"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/health"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/logging"
-	"github.com/Leonardoongaratto/llm-gateway/internal/platform/otel"
+	"github.com/Leonardoongaratto/llm-gateway/internal/platform/natsx"
+	"github.com/Leonardoongaratto/llm-gateway/internal/platform/service"
+	"github.com/Leonardoongaratto/llm-gateway/internal/platform/sqlx"
+	"google.golang.org/grpc"
 )
 
 type Config struct {
-	ServiceName  string `env:"SERVICE_NAME" default:"control"`
-	HTTPPort     int    `env:"HTTP_PORT" default:"8790"`
-	GRPCPort     int    `env:"GRPC_PORT" default:"9102"`
-	LogLevel     string `env:"LOG_LEVEL" default:"info"`
-	OTelEndpoint string `env:"OTEL_ENDPOINT" default:""`
+	ServiceName    string `env:"SERVICE_NAME" default:"control"`
+	HTTPPort       int    `env:"HTTP_PORT" default:"8790"`
+	GRPCPort       int    `env:"GRPC_PORT" default:"9102"`
+	LogLevel       string `env:"LOG_LEVEL" default:"info"`
+	OTelEndpoint   string `env:"OTEL_ENDPOINT" default:""`
+	DatabaseDriver string `env:"DATABASE_DRIVER" default:"sqlite"`
+	DatabaseDSN    string `env:"DATABASE_DSN" default:""`
+	NATSURL        string `env:"NATS_URL" default:""`
+	AdminToken     string `env:"ADMIN_TOKEN" default:"dev-admin-token"`
+	KeyPepper      string `env:"KEY_PEPPER" default:"dev-pepper"`
 }
 
 type namedCheck struct {
@@ -37,6 +46,7 @@ type namedCheck struct {
 type runOptions struct {
 	logWriter   io.Writer
 	extraChecks []namedCheck
+	seedStore   func(*store.Store) error
 }
 
 type RunOption func(*runOptions)
@@ -53,6 +63,51 @@ func WithCheck(name string, check health.CheckFunc) RunOption {
 	}
 }
 
+func WithStoreSeeder(seeder func(*store.Store) error) RunOption {
+	return func(o *runOptions) {
+		o.seedStore = seeder
+	}
+}
+
+func initDatabase(ctx context.Context, driver, dsn string) (*sql.DB, *store.Store, error) {
+	db, err := sqlx.Open(driver, dsn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to open database: %w", err)
+	}
+
+	if err := store.Migrate(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("failed to run control migrations: %w", err)
+	}
+
+	return db, store.New(db), nil
+}
+
+func startNATSServices(ctx context.Context, natsURL string, s *store.Store, logger *slog.Logger) func() {
+	if natsURL == "" {
+		return func() {}
+	}
+
+	nc, js, err := natsx.Connect(natsURL)
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to connect to nats", slog.Any("error", err))
+		return func() {}
+	}
+
+	if err := natsx.InitStreams(ctx, js); err != nil {
+		logger.ErrorContext(ctx, "failed to init nats streams", slog.Any("error", err))
+	}
+
+	relay := outbox.NewRelay(s, js, outbox.WithRelayLogger(logger))
+	go func() {
+		_ = relay.Run(ctx)
+	}()
+
+	return func() {
+		nc.Close()
+	}
+}
+
 func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 	options := runOptions{logWriter: os.Stdout}
 	for _, opt := range opts {
@@ -60,75 +115,57 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 	}
 
 	logger := logging.New(options.logWriter, cfg.LogLevel)
-	slog.SetDefault(logger)
 
-	otelProvider, err := otel.Init(ctx, otel.Config{
-		ServiceName:  cfg.ServiceName,
-		OTelEndpoint: cfg.OTelEndpoint,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to init otel: %w", err)
+	if cfg.DatabaseDriver == "" {
+		cfg.DatabaseDriver = "sqlite"
 	}
-	defer func() { _ = otelProvider.Shutdown(context.Background()) }()
+
+	db, controlStore, err := initDatabase(ctx, cfg.DatabaseDriver, cfg.DatabaseDSN)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	if options.seedStore != nil {
+		if err := options.seedStore(controlStore); err != nil {
+			return fmt.Errorf("failed to seed store: %w", err)
+		}
+	}
+
+	cleanupNATS := startNATSServices(ctx, cfg.NATSURL, controlStore, logger)
+	defer cleanupNATS()
 
 	checker := health.New()
+	checker.RegisterCheck("control_db", db.PingContext)
 	for _, ec := range options.extraChecks {
 		checker.RegisterCheck(ec.name, ec.check)
 	}
 
-	grpcLis, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.GRPCPort))
-	if err != nil {
-		return fmt.Errorf("failed to bind grpc port: %w", err)
+	srvCfg := service.Config{
+		ServiceName:  cfg.ServiceName,
+		HTTPPort:     cfg.HTTPPort,
+		GRPCPort:     cfg.GRPCPort,
+		LogLevel:     cfg.LogLevel,
+		OTelEndpoint: cfg.OTelEndpoint,
 	}
 
-	grpcServer := grpcx.NewServer(grpcx.WithServerLogger(logger))
-	controlv1.RegisterControlServiceServer(grpcServer, &controlv1.UnimplementedControlServiceServer{})
+	adminHandler := httpapi.NewHandler(controlStore, httpapi.Config{
+		AdminToken: cfg.AdminToken,
+		KeyPepper:  cfg.KeyPepper,
+	})
 
-	go func() {
-		logger.Info("starting control grpc server", slog.Int("port", cfg.GRPCPort))
-		if err := grpcServer.Serve(grpcLis); err != nil {
-			logger.Error("grpc server error", slog.Any("error", err))
-		}
-	}()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/livez", checker.LivezHandler())
-	mux.HandleFunc("/readyz", checker.ReadyzHandler())
-	mux.Handle("/metrics", otelProvider.MetricsHandler())
-
-	server := &http.Server{
-		Addr:              fmt.Sprintf("127.0.0.1:%d", cfg.HTTPPort),
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
+	srvOpts := service.Options{
+		LogWriter: options.logWriter,
+		Checker:   checker,
+		RegisterGRPC: func(srv *grpc.Server) {
+			controlv1.RegisterControlServiceServer(srv, grpcapi.New(controlStore))
+		},
+		RegisterHTTP: func(mux *http.ServeMux) {
+			mux.Handle("/admin/", adminHandler)
+		},
 	}
 
-	serverErr := make(chan error, 1)
-	go func() {
-		logger.Info("starting control http server", slog.Int("port", cfg.HTTPPort))
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErr <- err
-		}
-	}()
-
-	select {
-	case err := <-serverErr:
-		return err
-	case <-ctx.Done():
-	}
-
-	logger.Info("shutting down control service")
-	grpcServer.GracefulStop()
-
-	server.SetKeepAlivesEnabled(false)
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error("failed to shutdown gracefully", slog.Any("error", err))
-		return err
-	}
-	logger.Info("shutdown completed successfully")
-	return nil
+	return service.Run(ctx, srvCfg, srvOpts)
 }
 
 func realMain() int {
