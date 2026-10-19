@@ -2,6 +2,7 @@ package anthropic_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +22,14 @@ func TestAnthropicAdapter_Do_Success(t *testing.T) {
 		if r.Header.Get("anthropic-version") != "2023-06-01" {
 			http.Error(w, `{"error":{"message":"bad version"}}`, http.StatusBadRequest)
 			return
+		}
+
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("failed to decode request body: %v", err)
+		}
+		if temp, ok := body["temperature"].(float64); !ok || temp != 0.7 {
+			t.Errorf("expected temperature 0.7 in upstream body, got %v", body["temperature"])
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -46,10 +55,12 @@ func TestAnthropicAdapter_Do_Success(t *testing.T) {
 		anthropic.WithBaseURL(ts.URL),
 	)
 
+	tempVal := 0.7
 	req := &llm.Request{
-		ID:        "req-ant-1",
-		Model:     "claude-3-5-sonnet",
-		MaxTokens: 1000,
+		ID:          "req-ant-1",
+		Model:       "claude-3-5-sonnet",
+		MaxTokens:   1000,
+		Temperature: &tempVal,
 		Messages: []llm.Message{
 			{Role: "user", Content: "Hello"},
 		},

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -59,31 +60,74 @@ type errorResponse struct {
 	Error errorDetail `json:"error"`
 }
 
-func mapErrorDetails(err error) (int, string, string, string, string) {
+type RequestError struct {
+	StatusCode int
+	Message    string
+	Type       string
+	Code       string
+}
+
+func (e *RequestError) Error() string {
+	return e.Message
+}
+
+func mapClientErrors(err error) (int, string, string, string, string, bool) {
+	var reqErr *RequestError
+	if errors.As(err, &reqErr) {
+		errType := reqErr.Type
+		if errType == "" {
+			errType = "invalid_request_error"
+		}
+		code := reqErr.Code
+		if code == "" {
+			code = "invalid_request"
+		}
+		status := reqErr.StatusCode
+		if status == 0 {
+			status = http.StatusBadRequest
+		}
+		return status, reqErr.Message, errType, code, "", true
+	}
+
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return http.StatusRequestEntityTooLarge, "request body too large (maximum 10MB)", "invalid_request_error", "request_too_large", "", true
+	}
+
+	var jsonSyntaxErr *json.SyntaxError
+	var jsonUnmarshalTypeErr *json.UnmarshalTypeError
+	if errors.As(err, &jsonSyntaxErr) || errors.As(err, &jsonUnmarshalTypeErr) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return http.StatusBadRequest, "invalid json request body: " + err.Error(), "invalid_request_error", "invalid_request", "", true
+	}
+
 	var rateLimitErr *budgetclient.RateLimitError
 	if errors.As(err, &rateLimitErr) {
-		return http.StatusTooManyRequests, "rate limit exceeded", "rate_limit_error", "rate_limited", strconv.FormatInt(rateLimitErr.RetryAfterSeconds, 10)
+		return http.StatusTooManyRequests, "rate limit exceeded", "rate_limit_error", "rate_limited", strconv.FormatInt(rateLimitErr.RetryAfterSeconds, 10), true
 	}
 
-	if errors.Is(err, llm.ErrInvalidKey) {
-		return http.StatusUnauthorized, "invalid virtual key", "invalid_request_error", "invalid_key", ""
-	}
-	if errors.Is(err, llm.ErrModelNotAllowed) {
-		return http.StatusForbidden, "model not allowed for virtual key", "permission_error", "model_not_allowed", ""
-	}
-	if errors.Is(err, llm.ErrBudgetExceeded) {
-		return http.StatusPaymentRequired, "budget exceeded", "budget_error", "budget_exceeded", ""
-	}
-	if errors.Is(err, llm.ErrRateLimited) {
-		return http.StatusTooManyRequests, "rate limit exceeded", "rate_limit_error", "rate_limited", "60"
-	}
-	if errors.Is(err, llm.ErrAllProvidersFailed) {
-		return http.StatusBadGateway, "all providers failed in chain", "api_error", "all_providers_failed", ""
-	}
-	if errors.Is(err, llm.ErrBudgetUnavailable) {
-		return http.StatusServiceUnavailable, "budget service unavailable", "api_error", "budget_unavailable", ""
-	}
+	return 0, "", "", "", "", false
+}
 
+func mapKernelErrors(err error) (int, string, string, string, string, bool) {
+	switch {
+	case errors.Is(err, llm.ErrInvalidKey):
+		return http.StatusUnauthorized, "invalid virtual key", "invalid_request_error", "invalid_key", "", true
+	case errors.Is(err, llm.ErrModelNotAllowed):
+		return http.StatusForbidden, "model not allowed for virtual key", "permission_error", "model_not_allowed", "", true
+	case errors.Is(err, llm.ErrBudgetExceeded):
+		return http.StatusPaymentRequired, "budget exceeded", "budget_error", "budget_exceeded", "", true
+	case errors.Is(err, llm.ErrRateLimited):
+		return http.StatusTooManyRequests, "rate limit exceeded", "rate_limit_error", "rate_limited", "60", true
+	case errors.Is(err, llm.ErrAllProvidersFailed):
+		return http.StatusBadGateway, "all providers failed in chain", "api_error", "all_providers_failed", "", true
+	case errors.Is(err, llm.ErrBudgetUnavailable):
+		return http.StatusServiceUnavailable, "budget service unavailable", "api_error", "budget_unavailable", "", true
+	default:
+		return 0, "", "", "", "", false
+	}
+}
+
+func mapUpstreamError(err error) (int, string, string, string, string, bool) {
 	var upstreamErr *provider.UpstreamError
 	if errors.As(err, &upstreamErr) {
 		errType := "invalid_request_error"
@@ -92,9 +136,21 @@ func mapErrorDetails(err error) (int, string, string, string, string) {
 			errType = "api_error"
 			code = "upstream_error"
 		}
-		return upstreamErr.StatusCode, upstreamErr.Message, errType, code, ""
+		return upstreamErr.StatusCode, upstreamErr.Message, errType, code, "", true
 	}
+	return 0, "", "", "", "", false
+}
 
+func mapErrorDetails(err error) (int, string, string, string, string) {
+	if status, msg, errType, code, retryAfter, ok := mapClientErrors(err); ok {
+		return status, msg, errType, code, retryAfter
+	}
+	if status, msg, errType, code, retryAfter, ok := mapKernelErrors(err); ok {
+		return status, msg, errType, code, retryAfter
+	}
+	if status, msg, errType, code, retryAfter, ok := mapUpstreamError(err); ok {
+		return status, msg, errType, code, retryAfter
+	}
 	return http.StatusInternalServerError, "internal server error", "api_error", "internal_error", ""
 }
 
@@ -187,7 +243,27 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 	var req openAIChatReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, fmt.Errorf("invalid json request: %w", err))
+		writeError(w, err)
+		return
+	}
+
+	if strings.TrimSpace(req.Model) == "" {
+		writeError(w, &RequestError{
+			StatusCode: http.StatusBadRequest,
+			Message:    "model is required",
+			Type:       "invalid_request_error",
+			Code:       "invalid_request",
+		})
+		return
+	}
+
+	if len(req.Messages) == 0 {
+		writeError(w, &RequestError{
+			StatusCode: http.StatusBadRequest,
+			Message:    "messages is required and must not be empty",
+			Type:       "invalid_request_error",
+			Code:       "invalid_request",
+		})
 		return
 	}
 
@@ -307,7 +383,7 @@ func (h *Handler) streamOpenAI(w http.ResponseWriter, r *http.Request, rawKey st
 	if streamErr != nil {
 		errPayload, _ := json.Marshal(map[string]any{
 			"error": map[string]any{
-				"message": streamErr.Error(),
+				"message": "stream error from upstream provider",
 				"type":    "api_error",
 				"code":    "stream_error",
 			},
@@ -365,7 +441,27 @@ func (h *Handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	var req anthropicReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeAnthropicError(w, fmt.Errorf("invalid json request: %w", err))
+		writeAnthropicError(w, err)
+		return
+	}
+
+	if strings.TrimSpace(req.Model) == "" {
+		writeAnthropicError(w, &RequestError{
+			StatusCode: http.StatusBadRequest,
+			Message:    "model is required",
+			Type:       "invalid_request_error",
+			Code:       "invalid_request",
+		})
+		return
+	}
+
+	if len(req.Messages) == 0 {
+		writeAnthropicError(w, &RequestError{
+			StatusCode: http.StatusBadRequest,
+			Message:    "messages is required and must not be empty",
+			Type:       "invalid_request_error",
+			Code:       "invalid_request",
+		})
 		return
 	}
 
@@ -431,6 +527,7 @@ func (h *Handler) streamAnthropic(w http.ResponseWriter, r *http.Request, rawKey
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
+	inputTokens := core.EstimatePromptTokens(req.Messages)
 	msgStartPayload, _ := json.Marshal(map[string]any{
 		"type": "message_start",
 		"message": map[string]any{
@@ -441,7 +538,7 @@ func (h *Handler) streamAnthropic(w http.ResponseWriter, r *http.Request, rawKey
 			"content":     []any{},
 			"stop_reason": nil,
 			"usage": map[string]any{
-				"input_tokens":  0,
+				"input_tokens":  inputTokens,
 				"output_tokens": 0,
 			},
 		},
@@ -461,6 +558,7 @@ func (h *Handler) streamAnthropic(w http.ResponseWriter, r *http.Request, rawKey
 
 	var streamErr error
 	var finalOutputTokens int64
+	var estimatedOutputTokens int64
 	for chunk := range streamRes.Stream {
 		if chunk.Err != nil {
 			streamErr = chunk.Err
@@ -468,6 +566,8 @@ func (h *Handler) streamAnthropic(w http.ResponseWriter, r *http.Request, rawKey
 		}
 		if chunk.Usage != nil {
 			finalOutputTokens = chunk.Usage.OutputTokens
+		} else if chunk.Content != "" {
+			estimatedOutputTokens += int64(len(chunk.Content)+3) / 4
 		}
 		if chunk.Content != "" {
 			deltaPayload, _ := json.Marshal(map[string]any{
@@ -483,12 +583,16 @@ func (h *Handler) streamAnthropic(w http.ResponseWriter, r *http.Request, rawKey
 		}
 	}
 
+	if finalOutputTokens == 0 {
+		finalOutputTokens = estimatedOutputTokens
+	}
+
 	if streamErr != nil {
 		errPayload, _ := json.Marshal(map[string]any{
 			"type": "error",
 			"error": map[string]any{
 				"type":    "api_error",
-				"message": streamErr.Error(),
+				"message": "stream error from upstream provider",
 			},
 		})
 		_, _ = fmt.Fprintf(w, "event: error\ndata: %s\n\n", errPayload)

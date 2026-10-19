@@ -33,6 +33,8 @@ import (
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/logging"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/natsx"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/otel"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -86,17 +88,41 @@ func WithCoreService(svc *core.Service, authMgr *auth.Manager) RunOption {
 	}
 }
 
-func setupControl(ctx context.Context, controlAddr, keyPepper string, logger *slog.Logger) (*auth.Manager, func(), error) {
-	var controlClient controlv1.ControlServiceClient
-	cleanup := func() {}
+func dialControl(ctx context.Context, controlAddr string) (controlv1.ControlServiceClient, func(), error) {
+	if controlAddr == "" {
+		return nil, func() {}, nil
+	}
+	conn, err := grpcx.Dial(ctx, controlAddr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to dial control service at %s: %w", controlAddr, err)
+	}
+	return controlv1.NewControlServiceClient(conn), func() { _ = conn.Close() }, nil
+}
 
-	if controlAddr != "" {
-		conn, err := grpcx.Dial(ctx, controlAddr)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to dial control service at %s: %w", controlAddr, err)
+func retryLoadSnapshotInBackground(ctx context.Context, authMgr *auth.Manager, logger *slog.Logger) {
+	go func() {
+		backoff := 100 * time.Millisecond
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			if err := authMgr.LoadSnapshot(ctx); err == nil {
+				logger.Info("background snapshot load succeeded")
+				return
+			}
+			if backoff < 2*time.Second {
+				backoff *= 2
+			}
 		}
-		controlClient = controlv1.NewControlServiceClient(conn)
-		cleanup = func() { _ = conn.Close() }
+	}()
+}
+
+func setupControl(ctx context.Context, controlAddr, keyPepper string, logger *slog.Logger) (*auth.Manager, func(), error) {
+	controlClient, cleanup, err := dialControl(ctx, controlAddr)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	authMgr, err := auth.NewManager(keyPepper, controlClient, auth.WithLogger(logger))
@@ -106,7 +132,8 @@ func setupControl(ctx context.Context, controlAddr, keyPepper string, logger *sl
 	}
 	if controlClient != nil {
 		if err := authMgr.LoadSnapshot(ctx); err != nil {
-			logger.Warn("initial snapshot load failed, will retry on event", slog.Any("error", err))
+			logger.Warn("initial snapshot load failed, will retry in background", slog.Any("error", err))
+			retryLoadSnapshotInBackground(ctx, authMgr, logger)
 		}
 	}
 	return authMgr, cleanup, nil
@@ -120,7 +147,10 @@ func setupNATS(ctx context.Context, natsURL string, authMgr *auth.Manager, logge
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to connect to nats at %s: %w", natsURL, err)
 	}
-	_, _ = authMgr.StartConfigWatcher(ctx, js)
+	if _, err := authMgr.StartConfigWatcher(ctx, js); err != nil {
+		nc.Close()
+		return nil, nil, fmt.Errorf("failed to start config watcher: %w", err)
+	}
 	publisher := events.NewPublisher(js, events.WithLogger(logger))
 	cleanup := func() {
 		_ = publisher.Close()
@@ -147,16 +177,16 @@ func setupAuthAndNATS(ctx context.Context, cfg Config, logger *slog.Logger) (*au
 	}, nil
 }
 
-func setupBudget(ctx context.Context, cfg Config, logger *slog.Logger) (core.BudgetClient, func(), error) {
+func setupBudget(ctx context.Context, cfg Config, logger *slog.Logger) (core.BudgetClient, *grpc.ClientConn, func(), error) {
 	if cfg.BudgetAddr == "" {
-		return nil, func() {}, nil
+		return nil, nil, func() {}, nil
 	}
 	conn, err := grpcx.Dial(ctx, cfg.BudgetAddr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to dial budget service at %s: %w", cfg.BudgetAddr, err)
+		return nil, nil, nil, fmt.Errorf("failed to dial budget service at %s: %w", cfg.BudgetAddr, err)
 	}
 	bc := budgetclient.New(budgetv1.NewBudgetServiceClient(conn), budgetclient.WithLogger(logger))
-	return bc, func() {
+	return bc, conn, func() {
 		_ = bc.Close()
 		_ = conn.Close()
 	}, nil
@@ -218,6 +248,27 @@ func buildCoreService(cfg Config, authMgr *auth.Manager, budgetCli core.BudgetCl
 	})
 }
 
+func registerHealthChecks(checker *health.Checker, activeAuthMgr *auth.Manager, budgetCli core.BudgetClient, budgetConn *grpc.ClientConn, hasCoreService bool) {
+	checker.RegisterCheck("snapshot", func(_ context.Context) error {
+		if activeAuthMgr == nil || !activeAuthMgr.IsLoaded() {
+			return errors.New("auth snapshot not loaded")
+		}
+		return nil
+	})
+	checker.RegisterCheck("budget", func(_ context.Context) error {
+		if budgetCli == nil && !hasCoreService {
+			return errors.New("budget client not configured")
+		}
+		if budgetConn != nil {
+			state := budgetConn.GetState()
+			if state == connectivity.TransientFailure || state == connectivity.Shutdown {
+				return fmt.Errorf("budget connection unhealthy: %s", state)
+			}
+		}
+		return nil
+	})
+}
+
 func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 	options := runOptions{logWriter: os.Stdout}
 	for _, opt := range opts {
@@ -247,7 +298,7 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 	}
 	defer cleanupAuth()
 
-	budgetCli, cleanupBudget, err := setupBudget(ctx, cfg, logger)
+	budgetCli, budgetConn, cleanupBudget, err := setupBudget(ctx, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -258,18 +309,7 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 		activeAuthMgr = authMgr
 	}
 
-	checker.RegisterCheck("snapshot", func(_ context.Context) error {
-		if activeAuthMgr == nil || activeAuthMgr.GetSnapshot() == nil {
-			return errors.New("auth snapshot not loaded")
-		}
-		return nil
-	})
-	checker.RegisterCheck("budget", func(_ context.Context) error {
-		if budgetCli == nil && options.coreService == nil {
-			return errors.New("budget client not configured")
-		}
-		return nil
-	})
+	registerHealthChecks(checker, activeAuthMgr, budgetCli, budgetConn, options.coreService != nil)
 
 	svc := options.coreService
 	if svc == nil {

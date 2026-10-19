@@ -154,15 +154,24 @@ func (b *breakerDecorator) DoStream(ctx context.Context, req *llm.Request) (<-ch
 
 	wrapped := make(chan llm.Chunk)
 	go func() {
-		defer close(wrapped)
 		var streamErr error
+		defer func() {
+			close(wrapped)
+			b.recordResult(streamErr)
+		}()
 		for c := range ch {
 			if c.Err != nil {
 				streamErr = c.Err
 			}
-			wrapped <- c
+			select {
+			case <-ctx.Done():
+				if streamErr == nil {
+					streamErr = ctx.Err()
+				}
+				return
+			case wrapped <- c:
+			}
 		}
-		b.recordResult(streamErr)
 	}()
 	return wrapped, nil
 }

@@ -1,18 +1,21 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/subtle"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
-
-	"encoding/json"
-	"net/http"
 
 	budgetv1 "github.com/Leonardoongaratto/llm-gateway/gen/lgw/budget/v1"
 	"github.com/Leonardoongaratto/llm-gateway/internal/budget/core"
@@ -40,6 +43,7 @@ type Config struct {
 	DatabaseDriver string `env:"DATABASE_DRIVER" default:"sqlite"`
 	DatabaseDSN    string `env:"DATABASE_DSN" default:""`
 	NATSURL        string `env:"NATS_URL" default:""`
+	AdminToken     string `env:"ADMIN_TOKEN" default:""`
 }
 
 type namedCheck struct {
@@ -181,7 +185,7 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 			budgetv1.RegisterBudgetServiceServer(srv, grpcapi.New(budgetStore))
 		},
 		RegisterHTTP: func(mux *http.ServeMux) {
-			mux.HandleFunc("POST /admin/limits", handleAdminLimits(budgetStore))
+			mux.HandleFunc("POST /admin/limits", handleAdminLimits(budgetStore, cfg.AdminToken))
 		},
 	}
 
@@ -209,31 +213,70 @@ func main() {
 	os.Exit(realMain())
 }
 
-func handleAdminLimits(budgetStore *store.Store) http.HandlerFunc {
+type adminLimitsRequest struct {
+	KeyID              string `json:"key_id"`
+	DailyLimitMicros   int64  `json:"daily_limit_micros"`
+	MonthlyLimitMicros int64  `json:"monthly_limit_micros"`
+	RPM                int32  `json:"rpm"`
+}
+
+func checkAdminAuth(r *http.Request, adminToken string) bool {
+	if adminToken == "" {
+		return true
+	}
+	authHeader := r.Header.Get("Authorization")
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(parts[1]), []byte(adminToken)) == 1
+}
+
+func parseAdminLimitsRequest(w http.ResponseWriter, r *http.Request) (*adminLimitsRequest, error) {
+	body := http.MaxBytesReader(w, r.Body, 1<<20)
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return nil, errors.New("invalid request body")
+	}
+	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+
+	var req adminLimitsRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, errors.New("invalid request json")
+	}
+	if req.KeyID == "" {
+		return nil, errors.New("missing key_id")
+	}
+	if req.DailyLimitMicros < 0 || req.MonthlyLimitMicros < 0 || req.RPM < 0 {
+		return nil, errors.New("limits must be non-negative")
+	}
+	return &req, nil
+}
+
+func handleAdminLimits(budgetStore *store.Store, adminToken string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			KeyID              string `json:"key_id"`
-			DailyLimitMicros   int64  `json:"daily_limit_micros"`
-			MonthlyLimitMicros int64  `json:"monthly_limit_micros"`
-			RPM                int32  `json:"rpm"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if !checkAdminAuth(r, adminToken) {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
-		if req.KeyID == "" {
-			http.Error(w, "missing key_id", http.StatusBadRequest)
+
+		req, err := parseAdminLimitsRequest(w, r)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
 			return
 		}
+
 		if err := budgetStore.SetKeyLimits(r.Context(), core.KeyLimits{
 			KeyID:              req.KeyID,
 			DailyLimitMicros:   money.Micros(req.DailyLimitMicros),
 			MonthlyLimitMicros: money.Micros(req.MonthlyLimitMicros),
 			RPM:                req.RPM,
 		}); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, `{"error":"failed to set limits"}`, http.StatusInternalServerError)
 			return
 		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	}
 }

@@ -296,6 +296,7 @@ func TestBudget_AdminLimitsHTTP(t *testing.T) {
 		GRPCPort:       grpcPort,
 		LogLevel:       "debug",
 		DatabaseDriver: "sqlite",
+		AdminToken:     "test-admin-token",
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -310,20 +311,52 @@ func TestBudget_AdminLimitsHTTP(t *testing.T) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	defer client.CloseIdleConnections()
 
+	// 1. Unauthorized without token
 	payload := `{"key_id":"test-key","daily_limit_micros":1000000,"monthly_limit_micros":5000000,"rpm":60}`
-	resp, err := client.Post(url+"/admin/limits", "application/json", strings.NewReader(payload))
-	if err != nil || resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 on valid limits, got err: %v, resp: %v", err, resp)
+	req, _ := http.NewRequest(http.MethodPost, url+"/admin/limits", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without token, got err: %v, resp: %v", err, resp)
 	}
 	_ = resp.Body.Close()
 
-	resp, err = client.Post(url+"/admin/limits", "application/json", strings.NewReader(`{"key_id":""}`))
+	// 2. Authorized with valid token (and with BOM prefix)
+	bomPayload := "\xef\xbb\xbf" + payload
+	req, _ = http.NewRequest(http.MethodPost, url+"/admin/limits", strings.NewReader(bomPayload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+	resp, err = client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 with valid token and BOM, got err: %v, resp: %v", err, resp)
+	}
+	_ = resp.Body.Close()
+
+	// 3. Negative limits
+	req, _ = http.NewRequest(http.MethodPost, url+"/admin/limits", strings.NewReader(`{"key_id":"k","daily_limit_micros":-10}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+	resp, err = client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 on negative limit, got err: %v, resp: %v", err, resp)
+	}
+	_ = resp.Body.Close()
+
+	// 4. Missing key_id
+	req, _ = http.NewRequest(http.MethodPost, url+"/admin/limits", strings.NewReader(`{"key_id":""}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+	resp, err = client.Do(req)
 	if err != nil || resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 on empty key_id, got err: %v, resp: %v", err, resp)
 	}
 	_ = resp.Body.Close()
 
-	resp, err = client.Post(url+"/admin/limits", "application/json", strings.NewReader(`invalid-json`))
+	// 5. Invalid JSON
+	req, _ = http.NewRequest(http.MethodPost, url+"/admin/limits", strings.NewReader(`invalid-json`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+	resp, err = client.Do(req)
 	if err != nil || resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 on invalid json, got err: %v, resp: %v", err, resp)
 	}

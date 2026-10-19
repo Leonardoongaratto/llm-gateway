@@ -72,5 +72,5 @@ type Chunk struct {
 	Content      string `json:"content"`
 	FinishReason string `json:"finish_reason,omitempty"`
 	Usage        *Usage `json:"usage,omitempty"`
-	Err          error  `json:"error,omitempty"`
+	Err          error  `json:"-"`
 }

@@ -3,6 +3,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
@@ -111,7 +112,7 @@ try {
     Write-Host "  [OK] control: created virtual key $($createdKey.id) (key prefix: $($rawVirtualKey.Substring(0, 4)))"
 
     $limitsPayload = '{"key_id":"' + $createdKey.id + '","rpm":60,"daily_limit_micros":1000000000,"monthly_limit_micros":10000000000}'
-    $limitsCode = $limitsPayload | & curl.exe -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" -d '@-' "http://127.0.0.1:8792/admin/limits"
+    $limitsCode = $limitsPayload | & curl.exe -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer runtime-admin-token" -H "Content-Type: application/json" -d '@-' "http://127.0.0.1:8792/admin/limits"
     if ($limitsCode -ne "200") {
         Write-Error "budget POST /admin/limits failed with HTTP $limitsCode"
         exit 1
@@ -207,6 +208,15 @@ try {
         exit 1
     }
     Write-Host "  [OK] gateway: POST /v1/chat/completions (streaming) -> 200 SSE stream with [DONE]"
+
+    Write-Host "==> Validating POST /v1/messages (Anthropic)..."
+    $msgPayload = '{"model":"gpt-4o","max_tokens":100,"messages":[{"role":"user","content":"Hello anthropic"}]}'
+    $msgResp = $msgPayload | & curl.exe -s -H "Authorization: Bearer $rawVirtualKey" -H "Content-Type: application/json" -d '@-' "$gwBase/v1/messages" | Out-String
+    if (-not $msgResp.Contains('"type":"message"')) {
+        Write-Error "gateway POST /v1/messages failed: $msgResp"
+        exit 1
+    }
+    Write-Host "  [OK] gateway: POST /v1/messages -> 200 OK with Anthropic format"
 
     $delCode = & curl.exe -s -o /dev/null -w "%{http_code}" -X DELETE -H "Authorization: Bearer runtime-admin-token" "$adminBase/admin/keys/$($createdKey.id)"
     if ($delCode -ne "204") {

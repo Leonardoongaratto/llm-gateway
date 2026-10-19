@@ -2,6 +2,7 @@ package openai_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,14 @@ func TestOpenAIAdapter_Do_Success(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer test-openai-key" {
 			http.Error(w, `{"error":{"message":"unauthorized"}}`, http.StatusUnauthorized)
 			return
+		}
+
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("failed to decode request body: %v", err)
+		}
+		if temp, ok := body["temperature"].(float64); !ok || temp != 0.7 {
+			t.Errorf("expected temperature 0.7 in upstream body, got %v", body["temperature"])
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -49,10 +58,12 @@ func TestOpenAIAdapter_Do_Success(t *testing.T) {
 		openai.WithBaseURL(ts.URL),
 	)
 
+	tempVal := 0.7
 	req := &llm.Request{
-		ID:        "req-oai-1",
-		Model:     "gpt-4o",
-		MaxTokens: 1000,
+		ID:          "req-oai-1",
+		Model:       "gpt-4o",
+		MaxTokens:   1000,
+		Temperature: &tempVal,
 		Messages: []llm.Message{
 			{Role: "user", Content: "Hello OpenAI"},
 		},

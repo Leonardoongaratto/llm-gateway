@@ -21,6 +21,7 @@ import (
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/budgetclient"
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/cache"
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/core"
+	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/provider"
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/provider/fake"
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/router"
 	"github.com/Leonardoongaratto/llm-gateway/internal/kernel/llm"
@@ -476,7 +477,7 @@ func TestAPI_AC1D15_Stream_ProviderFailureAfterFirstByte(t *testing.T) {
 	if !strings.Contains(bodyStr, "event: error") {
 		t.Errorf("expected event: error emitted on mid-stream failure, got: %s", bodyStr)
 	}
-	if !strings.Contains(bodyStr, "provider stream network reset") {
+	if !strings.Contains(bodyStr, "stream error from upstream provider") {
 		t.Errorf("expected error message in payload, got: %s", bodyStr)
 	}
 	if strings.Contains(bodyStr, "data: [DONE]") {
@@ -573,5 +574,223 @@ func TestAPI_Models_FilteredByAllowedModels(t *testing.T) {
 	dataList, ok := parsed["data"].([]interface{})
 	if !ok || len(dataList) == 0 {
 		t.Fatalf("expected models in data list, got %v", parsed["data"])
+	}
+}
+
+func TestAPI_AC1D05_ProviderFallbackHeader(t *testing.T) {
+	authMgr, _ := auth.NewManager(testPepper, nil)
+	keyHash := hashKey(testRawKey, testPepper)
+
+	authMgr.UpdateSnapshot(&auth.Snapshot{
+		Version: 1,
+		KeysByHash: map[string]*auth.KeyInfo{
+			keyHash: {
+				ID:            "key-api-1",
+				AllowedModels: []string{"smart-route", "fake-primary", "fake-fallback"},
+				Active:        true,
+			},
+		},
+		Pricing: map[string]*auth.PricingInfo{
+			"fake-primary": {
+				Model:               "fake-primary",
+				Provider:            "p1",
+				InputPerMTokMicros:  1_000_000,
+				OutputPerMTokMicros: 2_000_000,
+			},
+			"fake-fallback": {
+				Model:               "fake-fallback",
+				Provider:            "p2",
+				InputPerMTokMicros:  1_000_000,
+				OutputPerMTokMicros: 2_000_000,
+			},
+		},
+		LogicalModels: map[string][]string{
+			"smart-route": {"fake-primary", "fake-fallback"},
+		},
+	})
+
+	mockBudget := &mockBudgetClient{}
+	localCache := cache.New(cache.WithCapacity(100), cache.WithTTL(5*time.Minute))
+	r := router.New()
+	p1 := fake.New(
+		fake.WithName("p1"),
+		fake.WithError(&provider.UpstreamError{StatusCode: 503, Message: "primary down", Retryable: true}),
+	)
+	p2 := fake.New(
+		fake.WithName("p2"),
+		fake.WithContent("Answer from fallback provider"),
+		fake.WithUsage(llm.Usage{InputTokens: 10, OutputTokens: 10}),
+	)
+	r.Register("fake-primary", p1)
+	r.Register("fake-fallback", p2)
+
+	svc := core.NewService(core.ServiceConfig{
+		AuthManager:    authMgr,
+		BudgetClient:   mockBudget,
+		EventPublisher: &mockEventPublisher{},
+		LocalCache:     localCache,
+		Router:         r,
+	})
+
+	handler := api.NewHandler(svc, authMgr)
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := bytes.NewBufferString(`{"model":"smart-route","messages":[{"role":"user","content":"hello"}]}`)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/chat/completions", body)
+	req.Header.Set("Authorization", "Bearer "+testRawKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK after fallback, got %d", resp.StatusCode)
+	}
+	provHeader := resp.Header.Get("X-LGW-Provider")
+	if provHeader != "p2" {
+		t.Errorf("expected X-LGW-Provider to be 'p2', got %q", provHeader)
+	}
+	if p1.CallCount() != 1 {
+		t.Errorf("expected p1 to be called once, got %d", p1.CallCount())
+	}
+	if p2.CallCount() != 1 {
+		t.Errorf("expected p2 to be called once, got %d", p2.CallCount())
+	}
+}
+
+func TestAPI_AC1D06_NoFallbackOn400(t *testing.T) {
+	authMgr, _ := auth.NewManager(testPepper, nil)
+	keyHash := hashKey(testRawKey, testPepper)
+
+	authMgr.UpdateSnapshot(&auth.Snapshot{
+		Version: 1,
+		KeysByHash: map[string]*auth.KeyInfo{
+			keyHash: {
+				ID:            "key-api-1",
+				AllowedModels: []string{"smart-route", "fake-primary", "fake-fallback"},
+				Active:        true,
+			},
+		},
+		Pricing: map[string]*auth.PricingInfo{
+			"fake-primary": {
+				Model:               "fake-primary",
+				Provider:            "p1",
+				InputPerMTokMicros:  1_000_000,
+				OutputPerMTokMicros: 2_000_000,
+			},
+		},
+		LogicalModels: map[string][]string{
+			"smart-route": {"fake-primary", "fake-fallback"},
+		},
+	})
+
+	mockBudget := &mockBudgetClient{}
+	localCache := cache.New(cache.WithCapacity(100), cache.WithTTL(5*time.Minute))
+	r := router.New()
+	p1 := fake.New(
+		fake.WithName("p1"),
+		fake.WithError(&provider.UpstreamError{StatusCode: 400, Message: "bad prompt", Retryable: false}),
+	)
+	p2 := fake.New(
+		fake.WithName("p2"),
+		fake.WithContent("should not be called"),
+	)
+	r.Register("fake-primary", p1)
+	r.Register("fake-fallback", p2)
+
+	svc := core.NewService(core.ServiceConfig{
+		AuthManager:    authMgr,
+		BudgetClient:   mockBudget,
+		EventPublisher: &mockEventPublisher{},
+		LocalCache:     localCache,
+		Router:         r,
+	})
+
+	handler := api.NewHandler(svc, authMgr)
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := bytes.NewBufferString(`{"model":"smart-route","messages":[{"role":"user","content":"bad input"}]}`)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/chat/completions", body)
+	req.Header.Set("Authorization", "Bearer "+testRawKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request without fallback, got %d", resp.StatusCode)
+	}
+	if p1.CallCount() != 1 {
+		t.Errorf("expected p1 to be called once, got %d", p1.CallCount())
+	}
+	if p2.CallCount() != 0 {
+		t.Errorf("expected p2 not to be called, got %d calls", p2.CallCount())
+	}
+}
+
+func assertErrorPayloadFormat(t *testing.T, endpoint string, body map[string]interface{}) {
+	t.Helper()
+	if endpoint == "/v1/messages" {
+		if body["type"] != "error" {
+			t.Errorf("expected Anthropic error type, got: %v", body)
+		}
+		return
+	}
+	if body["error"] == nil {
+		t.Errorf("expected OpenAI error field, got: %v", body)
+	}
+}
+
+func TestAPI_InvalidRequest_MalformedAndMissingFields(t *testing.T) {
+	ts, _, _ := setupAPITestServer()
+	defer ts.Close()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	cases := []struct {
+		name     string
+		endpoint string
+		payload  string
+	}{
+		{"chat malformed json", "/v1/chat/completions", `{"model": "fake-model", invalid`},
+		{"messages malformed json", "/v1/messages", `{"model": "fake-model", invalid`},
+		{"chat missing model", "/v1/chat/completions", `{"messages":[{"role":"user","content":"hi"}]}`},
+		{"messages missing model", "/v1/messages", `{"messages":[{"role":"user","content":"hi"}]}`},
+		{"chat missing messages", "/v1/chat/completions", `{"model":"fake-model"}`},
+		{"messages missing messages", "/v1/messages", `{"model":"fake-model"}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodPost, ts.URL+tc.endpoint, strings.NewReader(tc.payload))
+			req.Header.Set("Authorization", "Bearer "+testRawKey)
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("expected 400 Bad Request, got %d", resp.StatusCode)
+			}
+
+			var body map[string]interface{}
+			_ = json.NewDecoder(resp.Body).Decode(&body)
+			assertErrorPayloadFormat(t, tc.endpoint, body)
+		})
 	}
 }

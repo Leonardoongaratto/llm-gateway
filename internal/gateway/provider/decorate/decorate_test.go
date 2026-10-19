@@ -181,3 +181,42 @@ func TestWithMetrics(t *testing.T) {
 	for range ch {
 	}
 }
+
+func TestWithBreaker_StreamHalfOpenCancelDoesNotDeadlock(t *testing.T) {
+	err500 := &provider.UpstreamError{StatusCode: 500, Message: "error", Retryable: true}
+	fp := fake.New(
+		fake.WithErrorSequence(err500, err500, err500, nil, nil),
+	)
+	fp.SetStreamChunks([]llm.Chunk{{ID: "c1", Content: "1"}, {ID: "c2", Content: "2"}})
+	fp.SetDelay(30 * time.Millisecond)
+
+	cb := decorate.WithBreaker(fp,
+		decorate.WithFailureThreshold(3),
+		decorate.WithCooldown(50*time.Millisecond),
+	)
+
+	req := &llm.Request{ID: "req-halfopen"}
+	for i := 0; i < 3; i++ {
+		_, _ = cb.Do(context.Background(), req)
+	}
+
+	time.Sleep(60 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := cb.DoStream(ctx, req)
+	if err != nil {
+		t.Fatalf("expected stream to be allowed in half-open, got %v", err)
+	}
+
+	<-stream
+	cancel()
+
+	time.Sleep(50 * time.Millisecond)
+	resp, err := cb.Do(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected next call to execute after stream cancel in half-open, got %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+}

@@ -44,6 +44,7 @@ type Manager struct {
 	pepper string
 	client controlv1.ControlServiceClient
 	snap   atomic.Pointer[Snapshot]
+	loaded atomic.Bool
 	logger *slog.Logger
 }
 
@@ -87,6 +88,7 @@ func (m *Manager) LoadSnapshot(ctx context.Context) error {
 
 	snap := FromProto(protoSnap)
 	m.snap.Store(snap)
+	m.loaded.Store(true)
 	m.logger.InfoContext(ctx, "loaded snapshot from control service",
 		slog.Int64("version", snap.Version),
 		slog.Int("keys_count", len(snap.KeysByHash)),
@@ -101,6 +103,12 @@ func (m *Manager) UpdateSnapshot(s *Snapshot) {
 		return
 	}
 	m.snap.Store(s)
+	m.loaded.Store(true)
+}
+
+// IsLoaded returns true if a valid snapshot has been loaded.
+func (m *Manager) IsLoaded() bool {
+	return m.loaded.Load()
 }
 
 // GetSnapshot returns the current in-memory snapshot.

@@ -488,3 +488,18 @@ func TestManager_StartConfigWatcher(t *testing.T) {
 		t.Fatalf("expected snapshot to update and authenticate key-2 within 2 seconds")
 	}
 }
+
+func TestManager_IsLoaded(t *testing.T) {
+	mgr, err := auth.NewManager("pepper", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mgr.IsLoaded() {
+		t.Error("expected IsLoaded to be false initially")
+	}
+
+	mgr.UpdateSnapshot(&auth.Snapshot{Version: 1})
+	if !mgr.IsLoaded() {
+		t.Error("expected IsLoaded to be true after UpdateSnapshot")
+	}
+}

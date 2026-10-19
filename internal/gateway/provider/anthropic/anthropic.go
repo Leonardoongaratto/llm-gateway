@@ -38,23 +38,33 @@ func WithHTTPClient(client *http.Client) Option {
 	return func(a *Adapter) {
 		if client != nil {
 			a.client = client
+			a.streamClient = client
 		}
 	}
 }
 
 // Adapter implements provider.Provider for the Anthropic Messages API.
 type Adapter struct {
-	apiKey  string
-	baseURL string
-	client  *http.Client
+	apiKey       string
+	baseURL      string
+	client       *http.Client
+	streamClient *http.Client
 }
 
 // New creates a new Anthropic provider adapter.
 func New(apiKey string, opts ...Option) *Adapter {
+	var streamTransport *http.Transport
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		streamTransport = t.Clone()
+	} else {
+		streamTransport = &http.Transport{}
+	}
+	streamTransport.ResponseHeaderTimeout = 30 * time.Second
 	a := &Adapter{
-		apiKey:  apiKey,
-		baseURL: DefaultBaseURL,
-		client:  &http.Client{Timeout: 60 * time.Second},
+		apiKey:       apiKey,
+		baseURL:      DefaultBaseURL,
+		client:       &http.Client{Timeout: 60 * time.Second},
+		streamClient: &http.Client{Transport: streamTransport},
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -352,7 +362,11 @@ func (a *Adapter) DoStream(ctx context.Context, req *llm.Request) (<-chan llm.Ch
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
 
-	resp, err := a.client.Do(httpReq)
+	client := a.streamClient
+	if client == nil {
+		client = a.client
+	}
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil, err
