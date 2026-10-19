@@ -24,7 +24,7 @@ function Test-Package([string]$Package, [string]$CoverFile) {
 }
 
 $allPackages = go list ./...
-$packages = $allPackages | Where-Object { $_ -notmatch '/gen/' -and $_ -notmatch '/testdata' }
+$packages = $allPackages | Where-Object { $_ -notmatch '/gen/' -and $_ -notmatch '/testdata' -and $_ -notmatch '/scripts/' }
 $coverFiles = @()
 $failed = $false
 $tempDir = [System.IO.Path]::GetTempPath()
