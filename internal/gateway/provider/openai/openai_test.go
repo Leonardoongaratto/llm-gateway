@@ -122,10 +122,65 @@ func TestOpenAIAdapter_Options(t *testing.T) {
 	if adapter.Name() != "custom-provider" {
 		t.Errorf("expected custom-provider, got %s", adapter.Name())
 	}
-	ch, err := adapter.DoStream(context.Background(), &llm.Request{})
+}
+
+func TestOpenAIAdapter_DoStream_Success(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected flusher")
+		}
+
+		sseData := []string{
+			`data: {"id":"chatcmpl_1","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello "},"finish_reason":null}]}` + "\n\n",
+			`data: {"id":"chatcmpl_1","choices":[{"index":0,"delta":{"content":"world!"},"finish_reason":null}]}` + "\n\n",
+			`data: {"id":"chatcmpl_1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3}}}` + "\n\n",
+			`data: [DONE]` + "\n\n",
+		}
+
+		for _, msg := range sseData {
+			_, _ = w.Write([]byte(msg))
+			flusher.Flush()
+		}
+	}))
+	defer ts.Close()
+
+	adapter := openai.New("key", openai.WithBaseURL(ts.URL))
+	stream, err := adapter.DoStream(context.Background(), &llm.Request{Model: "gpt-4o"})
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unexpected streaming error: %v", err)
 	}
-	for range ch {
+
+	var content string
+	var finalUsage *llm.Usage
+	for chunk := range stream {
+		content += chunk.Content
+		if chunk.Usage != nil {
+			finalUsage = chunk.Usage
+		}
+	}
+
+	if content != "Hello world!" {
+		t.Errorf("expected 'Hello world!', got %q", content)
+	}
+	if finalUsage == nil || finalUsage.InputTokens != 10 || finalUsage.OutputTokens != 5 || finalUsage.CacheReadTokens != 3 {
+		t.Errorf("unexpected final usage: %+v", finalUsage)
+	}
+}
+
+func TestOpenAIAdapter_DoStream_HttpError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"error":{"message":"service unavailable"}}`, http.StatusServiceUnavailable)
+	}))
+	defer ts.Close()
+
+	adapter := openai.New("key", openai.WithBaseURL(ts.URL))
+	_, err := adapter.DoStream(context.Background(), &llm.Request{Model: "gpt-4o"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !provider.IsRetryable(err) {
+		t.Errorf("503 error must be retryable")
 	}
 }

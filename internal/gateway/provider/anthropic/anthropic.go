@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -190,9 +191,141 @@ func (a *Adapter) Do(ctx context.Context, req *llm.Request) (*llm.Response, erro
 	}, nil
 }
 
-// DoStream implements the Provider interface streaming stub. Detailed SSE parsing is provided in B-32.
-func (a *Adapter) DoStream(_ context.Context, _ *llm.Request) (<-chan llm.Chunk, error) {
-	ch := make(chan llm.Chunk)
-	close(ch)
-	return ch, nil
+type anthropicStreamEvent struct {
+	Type    string `json:"type"`
+	Message *struct {
+		ID    string         `json:"id"`
+		Model string         `json:"model"`
+		Usage anthropicUsage `json:"usage"`
+	} `json:"message,omitempty"`
+	Delta *struct {
+		Type       string  `json:"type"`
+		Text       string  `json:"text"`
+		StopReason *string `json:"stop_reason"`
+	} `json:"delta,omitempty"`
+	Usage *struct {
+		OutputTokens int64 `json:"output_tokens"`
+	} `json:"usage,omitempty"`
+}
+
+type anthropicStreamState struct {
+	inputTokens      int64
+	cacheReadTokens  int64
+	cacheWriteTokens int64
+}
+
+func (s *anthropicStreamState) processLine(line string) *llm.Chunk {
+	if !strings.HasPrefix(line, "data: ") {
+		return nil
+	}
+	payload := strings.TrimSpace(strings.TrimPrefix(line, "data: "))
+	var evt anthropicStreamEvent
+	if err := json.Unmarshal([]byte(payload), &evt); err != nil {
+		return nil
+	}
+
+	switch evt.Type {
+	case "message_start":
+		if evt.Message != nil {
+			s.inputTokens = evt.Message.Usage.InputTokens
+			s.cacheReadTokens = evt.Message.Usage.CacheReadInputTokens
+			s.cacheWriteTokens = evt.Message.Usage.CacheCreationInputTokens
+		}
+		return nil
+	case "content_block_delta":
+		if evt.Delta != nil && evt.Delta.Text != "" {
+			return &llm.Chunk{Content: evt.Delta.Text}
+		}
+		return nil
+	case "message_delta":
+		var outputTokens int64
+		if evt.Usage != nil {
+			outputTokens = evt.Usage.OutputTokens
+		}
+		stopReason := "stop"
+		if evt.Delta != nil && evt.Delta.StopReason != nil {
+			stopReason = *evt.Delta.StopReason
+		}
+		return &llm.Chunk{
+			FinishReason: stopReason,
+			Usage: &llm.Usage{
+				InputTokens:      s.inputTokens,
+				OutputTokens:     outputTokens,
+				CacheReadTokens:  s.cacheReadTokens,
+				CacheWriteTokens: s.cacheWriteTokens,
+			},
+		}
+	default:
+		return nil
+	}
+}
+
+func (a *Adapter) scanStream(ctx context.Context, body io.ReadCloser, out chan<- llm.Chunk) {
+	defer func() { _ = body.Close() }()
+	defer close(out)
+
+	state := &anthropicStreamState{}
+	scanner := bufio.NewScanner(body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if chunk := state.processLine(line); chunk != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case out <- *chunk:
+			}
+		}
+	}
+}
+
+// DoStream executes a streaming request against the Anthropic Messages API with SSE.
+func (a *Adapter) DoStream(ctx context.Context, req *llm.Request) (<-chan llm.Chunk, error) {
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 4096
+	}
+
+	msgs := make([]anthropicMessage, 0, len(req.Messages))
+	for _, m := range req.Messages {
+		msgs = append(msgs, anthropicMessage{
+			Role:    m.Role,
+			Content: m.Content,
+		})
+	}
+
+	bodyBytes, err := json.Marshal(anthropicRequest{
+		Model:     req.Model,
+		Messages:  msgs,
+		MaxTokens: maxTokens,
+		Stream:    true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+"/v1/messages", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("x-api-key", a.apiKey)
+	httpReq.Header.Set("anthropic-version", AnthropicVersion)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+
+	resp, err := a.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("http request failed: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		defer func() { _ = resp.Body.Close() }()
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, parseAnthropicError(respBody, resp.StatusCode)
+	}
+
+	out := make(chan llm.Chunk, 32)
+	go a.scanStream(ctx, resp.Body, out)
+
+	return out, nil
 }

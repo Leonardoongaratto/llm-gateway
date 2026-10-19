@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -80,11 +81,16 @@ type chatMessage struct {
 	Content string `json:"content"`
 }
 
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
 type chatRequest struct {
-	Model     string        `json:"model"`
-	Messages  []chatMessage `json:"messages"`
-	MaxTokens int64         `json:"max_tokens,omitempty"`
-	Stream    bool          `json:"stream"`
+	Model         string         `json:"model"`
+	Messages      []chatMessage  `json:"messages"`
+	MaxTokens     int64          `json:"max_tokens,omitempty"`
+	Stream        bool           `json:"stream"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
 }
 
 type chatChoice struct {
@@ -209,9 +215,140 @@ func (a *Adapter) Do(ctx context.Context, req *llm.Request) (*llm.Response, erro
 	}, nil
 }
 
-// DoStream implements the Provider interface streaming stub. Detailed SSE parsing is provided in B-32.
-func (a *Adapter) DoStream(_ context.Context, _ *llm.Request) (<-chan llm.Chunk, error) {
-	ch := make(chan llm.Chunk)
-	close(ch)
-	return ch, nil
+type chatStreamChoice struct {
+	Index int `json:"index"`
+	Delta struct {
+		Content string `json:"content"`
+		Role    string `json:"role"`
+	} `json:"delta"`
+	FinishReason *string `json:"finish_reason"`
+}
+
+type chatStreamChunk struct {
+	ID      string             `json:"id"`
+	Choices []chatStreamChoice `json:"choices"`
+	Usage   *chatUsage         `json:"usage,omitempty"`
+}
+
+func parseOpenAIStreamLine(line string) (*llm.Chunk, bool) {
+	if !strings.HasPrefix(line, "data: ") {
+		return nil, true
+	}
+	payload := strings.TrimSpace(strings.TrimPrefix(line, "data: "))
+	if payload == "[DONE]" {
+		return nil, false
+	}
+
+	var chunk chatStreamChunk
+	if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+		return nil, true
+	}
+
+	var content string
+	var finishReason string
+	if len(chunk.Choices) > 0 {
+		content = chunk.Choices[0].Delta.Content
+		if chunk.Choices[0].FinishReason != nil {
+			finishReason = *chunk.Choices[0].FinishReason
+		}
+	}
+
+	var usage *llm.Usage
+	if chunk.Usage != nil {
+		var cachedTokens int64
+		if chunk.Usage.PromptTokensDetails != nil {
+			cachedTokens = chunk.Usage.PromptTokensDetails.CachedTokens
+		}
+		usage = &llm.Usage{
+			InputTokens:     chunk.Usage.PromptTokens,
+			OutputTokens:    chunk.Usage.CompletionTokens,
+			CacheReadTokens: cachedTokens,
+		}
+	}
+
+	if content == "" && finishReason == "" && usage == nil {
+		return nil, true
+	}
+
+	return &llm.Chunk{
+		ID:           chunk.ID,
+		Content:      content,
+		FinishReason: finishReason,
+		Usage:        usage,
+	}, true
+}
+
+func (a *Adapter) scanStream(ctx context.Context, body io.ReadCloser, out chan<- llm.Chunk) {
+	defer func() { _ = body.Close() }()
+	defer close(out)
+
+	scanner := bufio.NewScanner(body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		chunk, cont := parseOpenAIStreamLine(line)
+		if !cont {
+			return
+		}
+		if chunk != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case out <- *chunk:
+			}
+		}
+	}
+}
+
+// DoStream executes a streaming request against the OpenAI Chat Completions API with SSE.
+func (a *Adapter) DoStream(ctx context.Context, req *llm.Request) (<-chan llm.Chunk, error) {
+	msgs := make([]chatMessage, 0, len(req.Messages))
+	for _, m := range req.Messages {
+		msgs = append(msgs, chatMessage{
+			Role:    m.Role,
+			Content: m.Content,
+		})
+	}
+
+	bodyBytes, err := json.Marshal(chatRequest{
+		Model:         req.Model,
+		Messages:      msgs,
+		MaxTokens:     req.MaxTokens,
+		Stream:        true,
+		StreamOptions: &streamOptions{IncludeUsage: true},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	endpoint := a.baseURL + "/v1/chat/completions"
+	if strings.Contains(a.baseURL, "/chat/completions") {
+		endpoint = a.baseURL
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	if a.apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+a.apiKey)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+
+	resp, err := a.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("http request failed: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		defer func() { _ = resp.Body.Close() }()
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, parseOpenAIError(respBody, resp.StatusCode)
+	}
+
+	out := make(chan llm.Chunk, 32)
+	go a.scanStream(ctx, resp.Body, out)
+
+	return out, nil
 }
