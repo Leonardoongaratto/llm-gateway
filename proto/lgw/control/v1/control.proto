@@ -19,6 +19,9 @@ message KeyInfo {
   repeated string allowed_models = 4;
   bool active = 5;
   google.protobuf.Timestamp expires_at = 6;
+  int64 daily_limit_micros = 7;
+  int64 monthly_limit_micros = 8;
+  int32 rpm = 9;
 }
 
 message PricingInfo {

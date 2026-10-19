@@ -29,6 +29,7 @@ const (
 	ConfigChanged_KEY              ConfigChanged_Kind = 1
 	ConfigChanged_PRICING          ConfigChanged_Kind = 2
 	ConfigChanged_MODELS           ConfigChanged_Kind = 3
+	ConfigChanged_KEY_REVOKED      ConfigChanged_Kind = 4
 )
 
 // Enum value maps for ConfigChanged_Kind.
@@ -38,12 +39,14 @@ var (
 		1: "KEY",
 		2: "PRICING",
 		3: "MODELS",
+		4: "KEY_REVOKED",
 	}
 	ConfigChanged_Kind_value = map[string]int32{
 		"KIND_UNSPECIFIED": 0,
 		"KEY":              1,
 		"PRICING":          2,
 		"MODELS":           3,
+		"KEY_REVOKED":      4,
 	}
 )
 
@@ -420,6 +423,7 @@ type KeyLimit struct {
 	DailyLimitMicros   int64                  `protobuf:"varint,2,opt,name=daily_limit_micros,json=dailyLimitMicros,proto3" json:"daily_limit_micros,omitempty"`
 	MonthlyLimitMicros int64                  `protobuf:"varint,3,opt,name=monthly_limit_micros,json=monthlyLimitMicros,proto3" json:"monthly_limit_micros,omitempty"`
 	Rpm                int32                  `protobuf:"varint,4,opt,name=rpm,proto3" json:"rpm,omitempty"`
+	Revoked            bool                   `protobuf:"varint,5,opt,name=revoked,proto3" json:"revoked,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -480,6 +484,13 @@ func (x *KeyLimit) GetRpm() int32 {
 		return x.Rpm
 	}
 	return 0
+}
+
+func (x *KeyLimit) GetRevoked() bool {
+	if x != nil {
+		return x.Revoked
+	}
+	return false
 }
 
 type ConfigChanged struct {
@@ -588,23 +599,25 @@ const file_lgw_events_v1_events_proto_rawDesc = "" +
 	"\fspent_micros\x18\x04 \x01(\x03R\vspentMicros\x12!\n" +
 	"\flimit_micros\x18\x05 \x01(\x03R\vlimitMicros\x12;\n" +
 	"\voccurred_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"occurredAt\"\x93\x01\n" +
+	"occurredAt\"\xad\x01\n" +
 	"\bKeyLimit\x12\x15\n" +
 	"\x06key_id\x18\x01 \x01(\tR\x05keyId\x12,\n" +
 	"\x12daily_limit_micros\x18\x02 \x01(\x03R\x10dailyLimitMicros\x120\n" +
 	"\x14monthly_limit_micros\x18\x03 \x01(\x03R\x12monthlyLimitMicros\x12\x10\n" +
-	"\x03rpm\x18\x04 \x01(\x05R\x03rpm\"\xd8\x01\n" +
+	"\x03rpm\x18\x04 \x01(\x05R\x03rpm\x12\x18\n" +
+	"\arevoked\x18\x05 \x01(\bR\arevoked\"\xe9\x01\n" +
 	"\rConfigChanged\x125\n" +
 	"\x04kind\x18\x01 \x01(\x0e2!.lgw.events.v1.ConfigChanged.KindR\x04kind\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\x03R\aversion\x126\n" +
 	"\n" +
-	"key_limits\x18\x03 \x03(\v2\x17.lgw.events.v1.KeyLimitR\tkeyLimits\">\n" +
+	"key_limits\x18\x03 \x03(\v2\x17.lgw.events.v1.KeyLimitR\tkeyLimits\"O\n" +
 	"\x04Kind\x12\x14\n" +
 	"\x10KIND_UNSPECIFIED\x10\x00\x12\a\n" +
 	"\x03KEY\x10\x01\x12\v\n" +
 	"\aPRICING\x10\x02\x12\n" +
 	"\n" +
-	"\x06MODELS\x10\x03BEZCgithub.com/Leonardoongaratto/llm-gateway/gen/lgw/events/v1;eventsv1b\x06proto3"
+	"\x06MODELS\x10\x03\x12\x0f\n" +
+	"\vKEY_REVOKED\x10\x04BEZCgithub.com/Leonardoongaratto/llm-gateway/gen/lgw/events/v1;eventsv1b\x06proto3"
 
 var (
 	file_lgw_events_v1_events_proto_rawDescOnce sync.Once

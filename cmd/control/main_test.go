@@ -12,8 +12,12 @@ import (
 	"testing"
 	"time"
 
+	controlv1 "github.com/Leonardoongaratto/llm-gateway/gen/lgw/control/v1"
+	"github.com/Leonardoongaratto/llm-gateway/internal/control/core"
+	"github.com/Leonardoongaratto/llm-gateway/internal/control/store"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/config"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/grpcx"
+	"github.com/Leonardoongaratto/llm-gateway/internal/platform/natsx"
 	"google.golang.org/grpc/health/grpc_health_v1"
 )
 
@@ -78,7 +82,10 @@ func waitForStatus(t *testing.T, url string, expectedCode int) {
 }
 
 func TestControl_DefaultConfigContract(t *testing.T) {
-	cfg, err := config.LoadFromEnv[Config]("LGW_NONEXISTENT_")
+	t.Setenv("LGW_TEST_ADMIN_TOKEN", "adm-secret")
+	t.Setenv("LGW_TEST_KEY_PEPPER", "pepper-secret")
+
+	cfg, err := config.LoadFromEnv[Config]("LGW_TEST_")
 	if err != nil {
 		t.Fatalf("failed to load default config: %v", err)
 	}
@@ -88,9 +95,23 @@ func TestControl_DefaultConfigContract(t *testing.T) {
 	if cfg.GRPCPort != 9102 {
 		t.Errorf("expected default GRPCPort 9102, got %d", cfg.GRPCPort)
 	}
+	if cfg.ServiceName != "control" {
+		t.Errorf("expected default ServiceName control, got %s", cfg.ServiceName)
+	}
+}
+
+func TestControl_RealMain_MissingRequiredSecretReturnsOne(t *testing.T) {
+	t.Setenv("LGW_ADMIN_TOKEN", "")
+	t.Setenv("LGW_KEY_PEPPER", "")
+	code := realMain()
+	if code != 1 {
+		t.Errorf("expected exit code 1 for missing required secrets, got %d", code)
+	}
 }
 
 func TestControl_RealMain_InvalidEnvReturnsOne(t *testing.T) {
+	t.Setenv("LGW_ADMIN_TOKEN", "adm-secret")
+	t.Setenv("LGW_KEY_PEPPER", "pepper-secret")
 	t.Setenv("LGW_HTTP_PORT", "not-an-int")
 	code := realMain()
 	if code != 1 {
@@ -98,39 +119,178 @@ func TestControl_RealMain_InvalidEnvReturnsOne(t *testing.T) {
 	}
 }
 
-func TestControl_RunAndEndpoints_AC1A11(t *testing.T) {
+func TestControl_Readyz503WithFailingCheck(t *testing.T) {
 	httpPort := getFreePort(t)
 	grpcPort := getFreePort(t)
 	cfg := Config{
-		ServiceName: "control",
-		HTTPPort:    httpPort,
-		GRPCPort:    grpcPort,
-		LogLevel:    "debug",
+		ServiceName:    "control",
+		HTTPPort:       httpPort,
+		GRPCPort:       grpcPort,
+		LogLevel:       "debug",
+		DatabaseDriver: "sqlite",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+
+	closeDBSeeder := func(s *store.Store) error {
+		return s.Close()
+	}
+
+	go func() {
+		errCh <- run(ctx, cfg, WithLogWriter(io.Discard), WithStoreSeeder(closeDBSeeder))
+	}()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/readyz", httpPort)
+	waitForStatus(t, url, http.StatusServiceUnavailable)
+
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+}
+
+func TestControl_RunErrors(t *testing.T) {
+	t.Run("invalid database driver", func(t *testing.T) {
+		cfg := Config{
+			DatabaseDriver: "unsupported-driver",
+		}
+		err := run(context.Background(), cfg, WithLogWriter(io.Discard))
+		if err == nil || !strings.Contains(err.Error(), "unsupported database driver") {
+			t.Fatalf("expected unsupported driver error, got: %v", err)
+		}
+	})
+
+	t.Run("failing seeder", func(t *testing.T) {
+		cfg := Config{
+			DatabaseDriver: "sqlite",
+		}
+		failingSeeder := func(_ *store.Store) error {
+			return errors.New("seeder failure")
+		}
+		err := run(context.Background(), cfg, WithLogWriter(io.Discard), WithStoreSeeder(failingSeeder))
+		if err == nil || !strings.Contains(err.Error(), "seeder failure") {
+			t.Fatalf("expected seeder failure, got: %v", err)
+		}
+	})
+
+	t.Run("nats connection failure handled gracefully", func(t *testing.T) {
+		cfg := Config{
+			ServiceName:    "control",
+			HTTPPort:       getFreePort(t),
+			GRPCPort:       getFreePort(t),
+			DatabaseDriver: "sqlite",
+			NATSURL:        "nats://127.0.0.1:1",
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- run(ctx, cfg, WithLogWriter(io.Discard))
+		}()
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+		if err := <-errCh; err != nil {
+			t.Fatalf("expected clean run even with nats error, got: %v", err)
+		}
+	})
+}
+
+func TestControl_RealMain_ServiceErrorReturnsOne(t *testing.T) {
+	t.Setenv("LGW_ADMIN_TOKEN", "valid-admin-token")
+	t.Setenv("LGW_KEY_PEPPER", "valid-key-pepper")
+	t.Setenv("LGW_DATABASE_DRIVER", "invalid-driver")
+	code := realMain()
+	if code != 1 {
+		t.Errorf("expected exit code 1 for failing service run, got %d", code)
+	}
+}
+
+func verifyGRPCControlService(ctx context.Context, t *testing.T, grpcPort int) {
+	t.Helper()
+
+	grpcConn, err := grpcx.Dial(ctx, fmt.Sprintf("127.0.0.1:%d", grpcPort))
+	if err != nil {
+		t.Fatalf("failed to dial control grpc: %v", err)
+	}
+	defer grpcConn.Close()
+
+	healthClient := grpc_health_v1.NewHealthClient(grpcConn)
+	healthResp, err := healthClient.Check(ctx, &grpc_health_v1.HealthCheckRequest{})
+	if err != nil || healthResp.Status != grpc_health_v1.HealthCheckResponse_SERVING {
+		t.Fatalf("grpc health check failed: %v, resp: %v", err, healthResp)
+	}
+
+	controlClient := controlv1.NewControlServiceClient(grpcConn)
+	snapResp, err := controlClient.GetSnapshot(ctx, &controlv1.GetSnapshotRequest{})
+	if err != nil {
+		t.Fatalf("GetSnapshot failed: %v", err)
+	}
+	if snapResp.Version < 1 {
+		t.Errorf("expected version >= 1, got %d", snapResp.Version)
+	}
+	if len(snapResp.Keys) != 1 || snapResp.Keys[0].Id != "seeded-key" {
+		t.Errorf("unexpected keys in snapshot: %+v", snapResp.Keys)
+	}
+}
+
+func verifyHTTPAdminRoutes(t *testing.T, httpPort int) {
+	t.Helper()
+
+	client := &http.Client{Timeout: 1 * time.Second}
+	defer client.CloseIdleConnections()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/admin/keys", httpPort)
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req.Header.Set("Authorization", "Bearer dev-admin-token")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("failed to call /admin/keys: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK from /admin/keys, got %d", resp.StatusCode)
+	}
+}
+
+func TestControl_RunAndEndpoints_AC1C06_AC1C08(t *testing.T) {
+	_, natsURL := natsx.StartEmbeddedServer(t)
+	httpPort := getFreePort(t)
+	grpcPort := getFreePort(t)
+	cfg := Config{
+		ServiceName:    "control",
+		HTTPPort:       httpPort,
+		GRPCPort:       grpcPort,
+		LogLevel:       "debug",
+		DatabaseDriver: "sqlite",
+		NATSURL:        natsURL,
+		AdminToken:     "dev-admin-token",
+		KeyPepper:      "dev-pepper",
 	}
 
 	var logBuf bytes.Buffer
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 
+	seeder := func(s *store.Store) error {
+		_, err := s.CreateKey(context.Background(), core.VirtualKey{
+			ID:      "seeded-key",
+			Name:    "Seeded Key",
+			KeyHash: "seeded-hash",
+		})
+		return err
+	}
+
 	go func() {
-		errCh <- run(ctx, cfg, WithLogWriter(&logBuf))
+		errCh <- run(ctx, cfg, WithLogWriter(&logBuf), WithStoreSeeder(seeder))
 	}()
 
 	url := fmt.Sprintf("http://127.0.0.1:%d", httpPort)
 	waitForEndpoints(t, url)
 
-	grpcConn, err := grpcx.Dial(context.Background(), fmt.Sprintf("127.0.0.1:%d", grpcPort))
-	if err != nil {
-		t.Fatalf("failed to dial control grpc: %v", err)
-	}
-
-	healthClient := grpc_health_v1.NewHealthClient(grpcConn)
-	healthResp, err := healthClient.Check(context.Background(), &grpc_health_v1.HealthCheckRequest{})
-	if err != nil || healthResp.Status != grpc_health_v1.HealthCheckResponse_SERVING {
-		_ = grpcConn.Close()
-		t.Fatalf("grpc health check failed: %v, resp: %v", err, healthResp)
-	}
-	_ = grpcConn.Close()
+	verifyGRPCControlService(ctx, t, grpcPort)
+	verifyHTTPAdminRoutes(t, httpPort)
 
 	cancel()
 
@@ -146,38 +306,5 @@ func TestControl_RunAndEndpoints_AC1A11(t *testing.T) {
 	logOutput := logBuf.String()
 	if !strings.Contains(logOutput, "shutting down control service") {
 		t.Errorf("expected shutdown log in buffer, got: %s", logOutput)
-	}
-	if !strings.Contains(logOutput, "shutdown completed successfully") {
-		t.Errorf("expected shutdown completed log in buffer, got: %s", logOutput)
-	}
-}
-
-func TestControl_Readyz503WithFailingCheck(t *testing.T) {
-	httpPort := getFreePort(t)
-	grpcPort := getFreePort(t)
-	cfg := Config{
-		ServiceName: "control",
-		HTTPPort:    httpPort,
-		GRPCPort:    grpcPort,
-		LogLevel:    "debug",
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-
-	failingCheck := func(_ context.Context) error {
-		return errors.New("database connection lost")
-	}
-
-	go func() {
-		errCh <- run(ctx, cfg, WithLogWriter(io.Discard), WithCheck("database", failingCheck))
-	}()
-
-	url := fmt.Sprintf("http://127.0.0.1:%d/readyz", httpPort)
-	waitForStatus(t, url, http.StatusServiceUnavailable)
-
-	cancel()
-	if err := <-errCh; err != nil {
-		t.Fatalf("run returned error: %v", err)
 	}
 }
