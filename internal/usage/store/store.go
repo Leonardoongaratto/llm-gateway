@@ -45,78 +45,78 @@ func (s *Store) DB() *sql.DB {
 }
 
 type UsageRecord struct {
-	RequestID        string
-	KeyID            string
-	Project          string
-	ModelRequested   string
-	ModelUsed        string
-	Provider         string
-	Source           string
-	CostKind         string
-	InputTokens      int64
-	OutputTokens     int64
-	CacheReadTokens  int64
-	CacheWriteTokens int64
-	CostMicros       int64
-	LatencyMs        int64
-	Status           string
-	CacheHit         bool
-	FallbackFrom     string
-	CreatedAt        time.Time
+	RequestID        string    `json:"request_id"`
+	KeyID            string    `json:"key_id"`
+	Project          string    `json:"project"`
+	ModelRequested   string    `json:"model_requested"`
+	ModelUsed        string    `json:"model_used"`
+	Provider         string    `json:"provider"`
+	Source           string    `json:"source"`
+	CostKind         string    `json:"cost_kind"`
+	InputTokens      int64     `json:"input_tokens"`
+	OutputTokens     int64     `json:"output_tokens"`
+	CacheReadTokens  int64     `json:"cache_read_tokens"`
+	CacheWriteTokens int64     `json:"cache_write_tokens"`
+	CostMicros       int64     `json:"cost_micros"`
+	LatencyMs        int64     `json:"latency_ms"`
+	Status           string    `json:"status"`
+	CacheHit         bool      `json:"cache_hit"`
+	FallbackFrom     string    `json:"fallback_from"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 type DailyAggregate struct {
-	Date             string
-	KeyID            string
-	Model            string
-	Provider         string
-	Source           string
-	CostKind         string
-	Requests         int64
-	InputTokens      int64
-	OutputTokens     int64
-	CacheReadTokens  int64
-	CacheWriteTokens int64
-	CostMicros       int64
-	UpdatedAt        time.Time
+	Date             string    `json:"date"`
+	KeyID            string    `json:"key_id"`
+	Model            string    `json:"model"`
+	Provider         string    `json:"provider"`
+	Source           string    `json:"source"`
+	CostKind         string    `json:"cost_kind"`
+	Requests         int64     `json:"requests"`
+	InputTokens      int64     `json:"input_tokens"`
+	OutputTokens     int64     `json:"output_tokens"`
+	CacheReadTokens  int64     `json:"cache_read_tokens"`
+	CacheWriteTokens int64     `json:"cache_write_tokens"`
+	CostMicros       int64     `json:"cost_micros"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type AuditEvent struct {
-	ID          string
-	EventType   string
-	Subject     string
-	PayloadJSON string
-	CreatedAt   time.Time
+	ID          string    `json:"id"`
+	EventType   string    `json:"event_type"`
+	Subject     string    `json:"subject"`
+	PayloadJSON string    `json:"payload_json"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type ImportCursor struct {
-	Source     string
-	FilePath   string
-	ByteOffset int64
-	LastLine   int64
-	UpdatedAt  time.Time
+	Source     string    `json:"source"`
+	FilePath   string    `json:"file_path"`
+	ByteOffset int64     `json:"byte_offset"`
+	LastLine   int64     `json:"last_line"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 type ImportRun struct {
-	ID              string
-	Source          string
-	Status          string
-	LinesRead       int64
-	RecordsImported int64
-	ErrorsCount     int64
-	ErrorDetails    string
-	StartedAt       time.Time
-	FinishedAt      *time.Time
+	ID              string     `json:"id"`
+	Source          string     `json:"source"`
+	Status          string     `json:"status"`
+	LinesRead       int64      `json:"lines_read"`
+	RecordsImported int64      `json:"records_imported"`
+	ErrorsCount     int64      `json:"errors_count"`
+	ErrorDetails    string     `json:"error_details"`
+	StartedAt       time.Time  `json:"started_at"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
 }
 
 type Subscription struct {
-	ID                string
-	Name              string
-	Provider          string
-	MonthlyCostMicros int64
-	RenewalDay        int
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ID                string    `json:"id"`
+	Name              string    `json:"name"`
+	Provider          string    `json:"provider"`
+	MonthlyCostMicros int64     `json:"monthly_cost_micros"`
+	RenewalDay        int       `json:"renewal_day"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type UsageFilter struct {
