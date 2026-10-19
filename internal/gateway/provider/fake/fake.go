@@ -103,6 +103,27 @@ func (p *Provider) CallCount() int {
 	return p.calls
 }
 
+// SetError updates the error sequence to return the given error.
+func (p *Provider) SetError(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.errorSeq = []error{err}
+}
+
+// SetStreamChunks updates the stream chunks emitted by DoStream.
+func (p *Provider) SetStreamChunks(chunks []llm.Chunk) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.streamChunks = chunks
+}
+
+// SetDelay updates the simulated delay.
+func (p *Provider) SetDelay(d time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.delay = d
+}
+
 // Requests returns all recorded requests received by this fake provider.
 func (p *Provider) Requests() []*llm.Request {
 	p.mu.Lock()

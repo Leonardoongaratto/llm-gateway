@@ -124,3 +124,20 @@ func TestFakeProvider_DoStream_Error(t *testing.T) {
 		t.Fatalf("expected testErr, got %v", err)
 	}
 }
+
+func TestFakeProvider_Setters(t *testing.T) {
+	fp := fake.New()
+	fp.SetDelay(10 * time.Millisecond)
+	fp.SetError(errors.New("dynamic error"))
+	fp.SetStreamChunks([]llm.Chunk{{ID: "dyn", Content: "Dynamic chunk"}})
+
+	_, err := fp.Do(context.Background(), &llm.Request{ID: "r1"})
+	if err == nil || err.Error() != "dynamic error" {
+		t.Errorf("expected dynamic error, got %v", err)
+	}
+
+	reqs := fp.Requests()
+	if len(reqs) != 1 || reqs[0].ID != "r1" {
+		t.Errorf("unexpected recorded requests: %+v", reqs)
+	}
+}
