@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -165,6 +166,11 @@ func (c *Consumer) handleUsageRecorded(ctx context.Context, msg jetstream.Msg) e
 		CreatedAt:        occurredAt,
 	}
 
+	if evt.RequestId == "" {
+		c.logger.Error("usage recorded event missing request_id")
+		return errors.New("usage recorded event missing request_id")
+	}
+
 	inserted, err := c.store.RecordUsage(ctx, rec)
 	if err != nil {
 		return fmt.Errorf("failed to record usage in store: %w", err)
@@ -172,6 +178,7 @@ func (c *Consumer) handleUsageRecorded(ctx context.Context, msg jetstream.Msg) e
 
 	if !inserted {
 		c.logger.Debug("ignoring duplicate usage recorded event", slog.String("request_id", evt.RequestId))
+		return nil
 	}
 
 	_ = c.store.RecordAudit(ctx, store.AuditEvent{

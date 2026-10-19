@@ -19,6 +19,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const DefaultClaudeCodeModel = "claude-3-5-sonnet-20241022"
+
 type rawClaudeCodeUsage struct {
 	InputTokens              int64 `json:"input_tokens"`
 	OutputTokens             int64 `json:"output_tokens"`
@@ -101,7 +103,7 @@ func finalizeImportRun(run *store.ImportRun, errorMsgs []string, walkErr error) 
 func (imp *Importer) Import(ctx context.Context) (*store.ImportRun, error) {
 	run := store.ImportRun{
 		ID:        "run-" + uuid.NewString(),
-		Source:    "claude-code",
+		Source:    "claude-code-local",
 		Status:    "running",
 		StartedAt: time.Now().UTC(),
 	}
@@ -167,6 +169,12 @@ func openFileAtCursor(ctx context.Context, st *store.Store, filePath string) (*o
 		return nil, 0, 0, fmt.Errorf("failed to open %s: %w", filePath, err)
 	}
 
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, 0, 0, fmt.Errorf("failed to stat %s: %w", filePath, err)
+	}
+
 	var startOffset int64
 	var lastLine int64
 
@@ -174,6 +182,11 @@ func openFileAtCursor(ctx context.Context, st *store.Store, filePath string) (*o
 	if err == nil && cursor != nil {
 		startOffset = cursor.ByteOffset
 		lastLine = cursor.LastLine
+	}
+
+	if info.Size() < startOffset {
+		startOffset = 0
+		lastLine = 0
 	}
 
 	if startOffset > 0 {
@@ -192,7 +205,7 @@ func processFileLine(lineBytes []byte, filePath, projectName string, currentLine
 	if parseErr != nil {
 		run.ErrorsCount++
 		if len(*errorMsgs) < 10 {
-			*errorMsgs = append(*errorMsgs, fmt.Sprintf("%s:%d: %v", filepath.Base(filePath), currentLine, parseErr))
+			*errorMsgs = append(*errorMsgs, fmt.Sprintf("%s:%d: malformed json line", filepath.Base(filePath), currentLine))
 		}
 		return store.UsageRecord{}, false
 	}
@@ -207,6 +220,9 @@ func parseLinesFromReader(r *bufio.Reader, filePath, projectName string, startOf
 	for {
 		lineBytes, readErr := r.ReadBytes('\n')
 		if len(lineBytes) > 0 {
+			if errors.Is(readErr, io.EOF) && lineBytes[len(lineBytes)-1] != '\n' {
+				break
+			}
 			currentOffset += int64(len(lineBytes))
 			currentLine++
 			if rec, ok := processFileLine(lineBytes, filePath, projectName, currentLine, run, errorMsgs); ok {
@@ -275,7 +291,7 @@ func extractUsageAndModel(entry rawClaudeCodeLine) (*rawClaudeCodeUsage, string,
 		msgID = entry.ID
 	}
 	if model == "" {
-		model = "claude-3-5-sonnet-20241022"
+		model = DefaultClaudeCodeModel
 	}
 	return usage, model, msgID
 }

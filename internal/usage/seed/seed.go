@@ -18,7 +18,6 @@ func Demo(ctx context.Context, st *store.Store, outputPath string, asOf time.Tim
 		asOf = time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	}
 
-	// 1. Subscriptions
 	claudeSub := store.Subscription{
 		ID:                "sub-1",
 		Name:              "Claude Code Pro",
@@ -32,20 +31,17 @@ func Demo(ctx context.Context, st *store.Store, outputPath string, asOf time.Tim
 		return nil, fmt.Errorf("failed to create subscription: %w", err)
 	}
 
-	// 2. Generate 90 days of records
 	records := generateDemoRecords(asOf)
 	if _, err := st.RecordUsageBatch(ctx, records); err != nil {
 		return nil, fmt.Errorf("failed to seed usage batch: %w", err)
 	}
 
-	// 3. Generate summary report for 30 days
 	repEngine := report.NewEngine(st)
 	summary, err := repEngine.GenerateSummary(ctx, 30, asOf)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate demo summary: %w", err)
 	}
 
-	// 4. Save to docs/summary.example.json if outputPath is provided
 	if outputPath != "" {
 		if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
 			return nil, fmt.Errorf("failed to create output dir: %w", err)

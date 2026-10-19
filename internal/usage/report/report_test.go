@@ -82,7 +82,7 @@ func seedTestData(ctx context.Context, t *testing.T, st *store.Store, asOf time.
 		t.Fatalf("failed to record org: %v", err)
 	}
 
-	// 3. Claude Code equivalent usage: $84 (84_000_000 micros) (AC-1E-10)
+	// Claude Code equivalent usage on Oct 17: $84 (84_000_000 micros) (AC-1E-10)
 	rec4 := store.UsageRecord{
 		RequestID:   "ccl-1",
 		ModelUsed:   "claude-3-5-sonnet",
@@ -97,7 +97,39 @@ func seedTestData(ctx context.Context, t *testing.T, st *store.Store, asOf time.
 		t.Fatalf("failed to record equivalent: %v", err)
 	}
 
-	// 4. Previous period traffic (60 days ago)
+	// Earlier in the same month (Oct 5): 10M spend
+	day5 := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	recDay5 := store.UsageRecord{
+		RequestID:   "r-day5",
+		KeyID:       "key-prod-1",
+		ModelUsed:   "claude-3-5-sonnet",
+		Provider:    "anthropic",
+		Source:      "gateway",
+		CostKind:    "cobrado",
+		InputTokens: 200000,
+		CostMicros:  10000000,
+		CreatedAt:   day5,
+	}
+	if _, err := st.RecordUsage(ctx, recDay5); err != nil {
+		t.Fatalf("failed to record day5: %v", err)
+	}
+
+	// Previous equivalent usage outside current cycle (40 days ago): 50M
+	recPrevEquiv := store.UsageRecord{
+		RequestID:   "prev-equiv",
+		ModelUsed:   "claude-3-5-sonnet",
+		Provider:    "anthropic",
+		Source:      "claude-code-local",
+		CostKind:    "equivalente",
+		CostMicros:  50000000,
+		InputTokens: 10000000,
+		CreatedAt:   asOf.AddDate(0, 0, -40),
+	}
+	if _, err := st.RecordUsage(ctx, recPrevEquiv); err != nil {
+		t.Fatalf("failed to record prev equiv: %v", err)
+	}
+
+	// 4. Previous period traffic (45 days ago)
 	prevDay := asOf.AddDate(0, 0, -45)
 	recPrev := store.UsageRecord{
 		RequestID:   "prev-1",
@@ -145,6 +177,22 @@ func verifyAC1E08SummaryBreakdowns(t *testing.T, rep *report.SummaryReport) {
 	if rep.PrevSpendMicros != 40000000 {
 		t.Errorf("expected 40M prev spend, got %d", rep.PrevSpendMicros)
 	}
+
+	var sumDaily int64
+	for _, d := range rep.Daily {
+		sumDaily += d.SpendMicros
+	}
+	if sumDaily != rep.SpendMicros {
+		t.Errorf("expected sum of daily spend (%d) to equal spend_micros (%d)", sumDaily, rep.SpendMicros)
+	}
+
+	var sumProv int64
+	for _, p := range rep.ByProvider {
+		sumProv += p.SpendMicros
+	}
+	if sumProv != rep.SpendMicros {
+		t.Errorf("expected sum of provider spend (%d) to equal spend_micros (%d)", sumProv, rep.SpendMicros)
+	}
 }
 
 func verifyAC1E10Aproveitamento(t *testing.T, rep *report.SummaryReport) {
@@ -165,8 +213,8 @@ func verifyAC1E10Aproveitamento(t *testing.T, rep *report.SummaryReport) {
 
 func verifyAC1E11Reconciliation(t *testing.T, rep *report.SummaryReport) {
 	ant := rep.Reconciliation.ByProvider["anthropic"]
-	if ant.GatewaySpendMicros != 50000000 {
-		t.Errorf("expected 50M gateway spend for anthropic, got %d", ant.GatewaySpendMicros)
+	if ant.GatewaySpendMicros != 60000000 {
+		t.Errorf("expected 60M gateway spend for anthropic, got %d", ant.GatewaySpendMicros)
 	}
 	if ant.OrgSpendMicros != 55000000 {
 		t.Errorf("expected 55M org spend for anthropic, got %d", ant.OrgSpendMicros)
@@ -177,14 +225,43 @@ func verifyAC1E11Reconciliation(t *testing.T, rep *report.SummaryReport) {
 	if ant.DiscrepancyMicros != 5000000 {
 		t.Errorf("expected 5M discrepancy, got %d", ant.DiscrepancyMicros)
 	}
-	if ant.ReconciledSpendMicros != 55000000 {
-		t.Errorf("expected 55M reconciled spend, got %d", ant.ReconciledSpendMicros)
+	if ant.ReconciledSpendMicros != 65000000 {
+		t.Errorf("expected 65M reconciled spend, got %d", ant.ReconciledSpendMicros)
 	}
 
-	// Total spend: Anthropic reconciled (55M) + OpenAI gateway (30M) = 85M
-	// Notice: NOT double counted (50M + 55M + 30M = 135M would be double counted!)
-	if rep.SpendMicros != 85000000 {
-		t.Errorf("expected 85M total reconciled spend, got %d", rep.SpendMicros)
+	// Total spend: Anthropic reconciled (65M) + OpenAI gateway (30M) = 95M
+	if rep.SpendMicros != 95000000 {
+		t.Errorf("expected 95M total reconciled spend, got %d", rep.SpendMicros)
+	}
+}
+
+func verifyBUG01Invariance(ctx context.Context, t *testing.T, engine *report.Engine, rep *report.SummaryReport, asOf time.Time) {
+	t.Helper()
+	rep7, err := engine.GenerateSummary(ctx, 7, asOf)
+	if err != nil {
+		t.Fatalf("GenerateSummary(7) failed: %v", err)
+	}
+	if rep7.ProjectedMonthMicros != rep.ProjectedMonthMicros {
+		t.Errorf("expected projected month micros for days=7 (%d) to equal days=30 (%d)",
+			rep7.ProjectedMonthMicros, rep.ProjectedMonthMicros)
+	}
+}
+
+func verifyBUG02Invariance(ctx context.Context, t *testing.T, engine *report.Engine, asOf time.Time) {
+	t.Helper()
+	rep7, err := engine.GenerateSummary(ctx, 7, asOf)
+	if err != nil {
+		t.Fatalf("GenerateSummary(7) failed: %v", err)
+	}
+	rep90, err := engine.GenerateSummary(ctx, 90, asOf)
+	if err != nil {
+		t.Fatalf("GenerateSummary(90) failed: %v", err)
+	}
+	if len(rep7.Subscriptions) == 0 || rep7.Subscriptions[0].Aproveitamento != 4.2 {
+		t.Errorf("expected aproveitamento 4.2 for days=7, got %v", rep7.Subscriptions[0].Aproveitamento)
+	}
+	if len(rep90.Subscriptions) == 0 || rep90.Subscriptions[0].Aproveitamento != 4.2 {
+		t.Errorf("expected aproveitamento 4.2 for days=90, got %v", rep90.Subscriptions[0].Aproveitamento)
 	}
 }
 
@@ -207,9 +284,7 @@ func TestReportEngine_SummaryACs(t *testing.T) {
 	})
 
 	t.Run("AC-1E-09: Projected month micros calculation", func(t *testing.T) {
-		// Day 17 of 31 days with 85_000_000 spend in month to date
-		// projected = (85000000 * 31) / 17 = 155000000
-		expectedProj := (int64(85000000) * 31) / 17
+		expectedProj := (int64(95000000) * 31) / 17
 		if rep.ProjectedMonthMicros != expectedProj {
 			t.Errorf("expected projected month micros %d, got %d", expectedProj, rep.ProjectedMonthMicros)
 		}
@@ -221,5 +296,13 @@ func TestReportEngine_SummaryACs(t *testing.T) {
 
 	t.Run("AC-1E-11: Reconciliation and anti-double counting", func(t *testing.T) {
 		verifyAC1E11Reconciliation(t, rep)
+	})
+
+	t.Run("BUG-01: Projected month micros is invariant to days parameter", func(t *testing.T) {
+		verifyBUG01Invariance(ctx, t, engine, rep, asOf)
+	})
+
+	t.Run("BUG-02: Subscription aproveitamento is invariant to days parameter", func(t *testing.T) {
+		verifyBUG02Invariance(ctx, t, engine, asOf)
 	})
 }

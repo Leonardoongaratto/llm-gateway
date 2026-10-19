@@ -325,6 +325,12 @@ func TestConsumer_Dispatch_ErrorsAndGeneric(t *testing.T) {
 		t.Errorf("expected error for invalid config payload")
 	}
 
+	// Usage with empty request_id
+	emptyReqIDJSON := []byte(`{"request_id": "", "model_used": "gpt-4o"}`)
+	if err := c.Dispatch(ctx, &mockMsg{subject: "lgw.usage.recorded.v1", data: emptyReqIDJSON}); err == nil {
+		t.Errorf("expected error for empty request_id")
+	}
+
 	// Generic subject
 	if err := c.Dispatch(ctx, &mockMsg{subject: "lgw.other.custom.v1", data: []byte(`{"hello": "world"}`)}); err != nil {
 		t.Errorf("unexpected error on generic dispatch: %v", err)

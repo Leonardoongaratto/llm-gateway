@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"bytes"
-	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -17,7 +16,6 @@ import (
 	"github.com/Leonardoongaratto/llm-gateway/internal/usage/report"
 	"github.com/Leonardoongaratto/llm-gateway/internal/usage/store"
 	"github.com/google/uuid"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type Config struct {
@@ -58,12 +56,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) authenticate(r *http.Request) bool {
-	// Health and metrics are always unauthenticated
-	path := r.URL.Path
-	if path == "/livez" || path == "/readyz" || path == "/metrics" {
-		return true
-	}
-
 	if h.cfg.AdminToken == "" {
 		return true
 	}
@@ -77,10 +69,6 @@ func (h *Handler) authenticate(r *http.Request) bool {
 }
 
 func (h *Handler) registerRoutes() {
-	h.mux.HandleFunc("GET /livez", h.handleLivez)
-	h.mux.HandleFunc("GET /readyz", h.handleReadyz)
-	h.mux.Handle("GET /metrics", promhttp.Handler())
-
 	h.mux.HandleFunc("GET /admin/usage", h.handleQueryUsage)
 	h.mux.HandleFunc("GET /admin/summary", h.handleGetSummary)
 
@@ -111,24 +99,6 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
 	}
 	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
 	return json.Unmarshal(data, v)
-}
-
-func (h *Handler) handleLivez(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (h *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-	defer cancel()
-
-	if err := h.store.DB().PingContext(ctx); err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-			"status": "unavailable",
-			"error":  "database unreachable: " + err.Error(),
-		})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *Handler) handleQueryUsage(w http.ResponseWriter, r *http.Request) {
@@ -170,9 +140,14 @@ func (h *Handler) handleQueryUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleGetSummary(w http.ResponseWriter, r *http.Request) {
-	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
-	if days <= 0 {
-		days = 30
+	days := 30
+	if d := r.URL.Query().Get("days"); d != "" {
+		parsed, err := strconv.Atoi(d)
+		if err != nil || (parsed != 7 && parsed != 30 && parsed != 90) {
+			writeError(w, http.StatusBadRequest, "invalid days parameter: must be 7, 30, or 90")
+			return
+		}
+		days = parsed
 	}
 
 	rep, err := h.reportEngine.GenerateSummary(r.Context(), days, time.Now())
@@ -201,6 +176,11 @@ func (h *Handler) handleCreateSubscription(w http.ResponseWriter, r *http.Reques
 
 	if strings.TrimSpace(payload.Name) == "" || strings.TrimSpace(payload.Provider) == "" {
 		writeError(w, http.StatusBadRequest, "name and provider are required")
+		return
+	}
+
+	if payload.MonthlyCostMicros < 0 || payload.PriceMicros < 0 {
+		writeError(w, http.StatusBadRequest, "monthly_cost_micros cannot be negative")
 		return
 	}
 

@@ -241,10 +241,13 @@ func runSeedDemo() int {
 	}
 
 	st := store.New(db)
-	outputPath := "docs/summary.example.json"
-	if _, err := os.Stat("go.mod"); os.IsNotExist(err) {
-		if _, err := os.Stat("../../go.mod"); err == nil {
-			outputPath = "../../docs/summary.example.json"
+	outputPath := os.Getenv("LGW_SEED_OUTPUT_PATH")
+	if outputPath == "" {
+		outputPath = "docs/summary.example.json"
+		if _, err := os.Stat("go.mod"); os.IsNotExist(err) {
+			if _, err := os.Stat("../../go.mod"); err == nil {
+				outputPath = "../../docs/summary.example.json"
+			}
 		}
 	}
 	asOf := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)

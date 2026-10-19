@@ -83,35 +83,46 @@ func doRequest(t *testing.T, method, url, token string, body any) (*http.Respons
 	return resp, buf.Bytes()
 }
 
-func TestHealthEndpoints_AC1E14(t *testing.T) {
-	srv, st := setupTestServer(t, "secret-token")
+func TestSummary_DaysValidation(t *testing.T) {
+	srv, _ := setupTestServer(t, "")
 
-	// /livez
-	resp, body := doRequest(t, http.MethodGet, srv.URL+"/livez", "", nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected livez 200, got %d", resp.StatusCode)
-	}
-	if !bytes.Contains(body, []byte(`"status":"ok"`)) {
-		t.Errorf("expected livez ok, got %s", string(body))
-	}
-
-	// /readyz
-	respReady, _ := doRequest(t, http.MethodGet, srv.URL+"/readyz", "", nil)
-	if respReady.StatusCode != http.StatusOK {
-		t.Errorf("expected readyz 200, got %d", respReady.StatusCode)
+	validDays := []string{"", "?days=7", "?days=30", "?days=90"}
+	for _, q := range validDays {
+		resp, _ := doRequest(t, http.MethodGet, srv.URL+"/admin/summary"+q, "", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected 200 for days query '%s', got %d", q, resp.StatusCode)
+		}
 	}
 
-	// /metrics
-	respMetrics, _ := doRequest(t, http.MethodGet, srv.URL+"/metrics", "", nil)
-	if respMetrics.StatusCode != http.StatusOK {
-		t.Errorf("expected metrics 200, got %d", respMetrics.StatusCode)
+	invalidDays := []string{"?days=15", "?days=0", "?days=-1", "?days=abc"}
+	for _, q := range invalidDays {
+		resp, _ := doRequest(t, http.MethodGet, srv.URL+"/admin/summary"+q, "", nil)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("expected 400 for invalid days query '%s', got %d", q, resp.StatusCode)
+		}
+	}
+}
+
+func TestCreateSubscription_Validation(t *testing.T) {
+	srv, _ := setupTestServer(t, "")
+
+	// Missing name or provider
+	resp, _ := doRequest(t, http.MethodPost, srv.URL+"/admin/subscriptions", "", map[string]any{
+		"name":     "",
+		"provider": "anthropic",
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for empty name, got %d", resp.StatusCode)
 	}
 
-	// Close DB to verify 503 on readyz
-	_ = st.DB().Close()
-	respDown, bodyDown := doRequest(t, http.MethodGet, srv.URL+"/readyz", "", nil)
-	if respDown.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("expected 503 when db is closed, got %d: %s", respDown.StatusCode, string(bodyDown))
+	// Negative monthly cost
+	respNeg, _ := doRequest(t, http.MethodPost, srv.URL+"/admin/subscriptions", "", map[string]any{
+		"name":                "Negative Sub",
+		"provider":            "anthropic",
+		"monthly_cost_micros": -1000,
+	})
+	if respNeg.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for negative monthly_cost_micros, got %d", respNeg.StatusCode)
 	}
 }
 

@@ -41,7 +41,6 @@ func DefaultPricing(model string) ModelPricing {
 			CacheWritePerMTokMicros: 2500000,
 		}
 	default:
-		// Default to Sonnet rates
 		return ModelPricing{
 			InputPerMTokMicros:      3000000,
 			OutputPerMTokMicros:     15000000,

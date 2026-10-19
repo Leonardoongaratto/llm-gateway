@@ -203,8 +203,8 @@
     {
       "model": "claude-3-5-sonnet-20241022",
       "spend_micros": 19614117,
-      "requests": 32,
-      "tokens": 21047310
+      "requests": 31,
+      "tokens": 4247310
     },
     {
       "model": "gpt-4o",

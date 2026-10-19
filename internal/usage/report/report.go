@@ -95,28 +95,48 @@ func (e *Engine) GenerateSummary(ctx context.Context, days int, asOf time.Time) 
 		return nil, fmt.Errorf("failed to query previous aggregates: %w", err)
 	}
 
+	firstOfMonth := time.Date(asOf.Year(), asOf.Month(), 1, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
+	mtdAggs, err := e.store.QueryDailyAggregates(ctx, firstOfMonth, endDate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query mtd aggregates: %w", err)
+	}
+
 	subs, err := e.store.ListSubscriptions(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list subscriptions: %w", err)
 	}
 
-	rep := e.assembleReport(currentAggs, prevAggs, subs, days, startDate, endDate, asOf)
+	var subAggs []store.DailyAggregate
+	if len(subs) > 0 {
+		minCycleStart := asOf
+		for _, s := range subs {
+			start := subscriptionCycleStart(asOf, s.RenewalDay)
+			if start.Before(minCycleStart) {
+				minCycleStart = start
+			}
+		}
+		subAggs, err = e.store.QueryDailyAggregates(ctx, minCycleStart.Format("2006-01-02"), endDate)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query subscription aggregates: %w", err)
+		}
+	}
+
+	rep := e.assembleReport(currentAggs, prevAggs, mtdAggs, subAggs, subs, days, startDate, endDate, asOf)
 	return rep, nil
 }
 
-func (e *Engine) assembleReport(currentAggs, prevAggs []store.DailyAggregate, subs []store.Subscription, days int, startDate, endDate string, asOf time.Time) *SummaryReport {
-	daily := buildDailyBreakdown(currentAggs)
-	byModel := buildModelBreakdown(currentAggs)
-	byKey := buildKeyBreakdown(currentAggs)
-	byProvider := buildProviderBreakdown(currentAggs)
-	subItems := buildSubscriptionSummary(subs, currentAggs)
+func (e *Engine) assembleReport(currentAggs, prevAggs, mtdAggs, subAggs []store.DailyAggregate, subs []store.Subscription, days int, startDate, endDate string, asOf time.Time) *SummaryReport {
 	reconciliation := buildReconciliation(currentAggs)
-
 	spendMicros := reconciliation.TotalReconciledMicros
 	prevSpendMicros := calculateBilledSpend(prevAggs)
 
-	firstOfMonth := time.Date(asOf.Year(), asOf.Month(), 1, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
-	currentMonthSpend := calculateMonthToDateSpend(currentAggs, firstOfMonth)
+	daily := buildDailyBreakdown(currentAggs)
+	byModel := buildModelBreakdown(currentAggs)
+	byKey := buildKeyBreakdown(currentAggs)
+	byProvider := buildProviderBreakdown(currentAggs, reconciliation)
+	subItems := buildSubscriptionSummary(subs, subAggs, asOf, endDate)
+
+	currentMonthSpend := calculateBilledSpend(mtdAggs)
 	projectedMonthMicros := core.ProjectedMonthMicros(currentMonthSpend, asOf.Day(), core.DaysInMonth(asOf))
 
 	return &SummaryReport{
@@ -136,54 +156,152 @@ func (e *Engine) assembleReport(currentAggs, prevAggs []store.DailyAggregate, su
 }
 
 func calculateBilledSpend(aggs []store.DailyAggregate) int64 {
-	gwByProvider := make(map[string]int64)
-	orgByProvider := make(map[string]int64)
-
-	for _, a := range aggs {
-		if a.CostKind != string(core.CostKindCobrado) {
-			continue
-		}
-		if a.Source == string(core.SourceGateway) {
-			gwByProvider[a.Provider] += a.CostMicros
-		} else if a.Source == string(core.SourceAnthropicOrg) || a.Source == string(core.SourceOpenAIOrg) {
-			orgByProvider[a.Provider] += a.CostMicros
-		}
+	daily := buildDailyBreakdown(aggs)
+	var total int64
+	for _, d := range daily {
+		total += d.SpendMicros
 	}
-
-	rep := core.ReconcileAll(gwByProvider, orgByProvider)
-	return rep.TotalReconciledMicros
+	return total
 }
 
-func calculateMonthToDateSpend(aggs []store.DailyAggregate, firstOfMonth string) int64 {
-	var mtdAggs []store.DailyAggregate
+type provDaily struct {
+	gw  int64
+	org int64
+}
+
+func aggregateDailyProviderCosts(aggs []store.DailyAggregate) (map[string]map[string]*provDaily, map[string]bool) {
+	dailyProv := make(map[string]map[string]*provDaily)
+	allProviders := make(map[string]bool)
+
 	for _, a := range aggs {
-		if a.Date >= firstOfMonth {
-			mtdAggs = append(mtdAggs, a)
+		if a.CostKind != string(core.CostKindCobrado) || a.Provider == "" {
+			continue
+		}
+		allProviders[a.Provider] = true
+		dp, exists := dailyProv[a.Date]
+		if !exists {
+			dp = make(map[string]*provDaily)
+			dailyProv[a.Date] = dp
+		}
+		pData, exists := dp[a.Provider]
+		if !exists {
+			pData = &provDaily{}
+			dp[a.Provider] = pData
+		}
+		if a.Source == string(core.SourceGateway) {
+			pData.gw += a.CostMicros
+		} else if a.Source == string(core.SourceAnthropicOrg) || a.Source == string(core.SourceOpenAIOrg) {
+			pData.org += a.CostMicros
 		}
 	}
-	return calculateBilledSpend(mtdAggs)
+	return dailyProv, allProviders
+}
+
+func reconcileProviderAcrossDays(dailyProv map[string]map[string]*provDaily, p string) core.ProviderReconciliation {
+	var totalGw, totalOrg, totalOverlap, totalDiscrepancy, totalReconciled int64
+	for _, dp := range dailyProv {
+		pData := dp[p]
+		if pData == nil {
+			continue
+		}
+		rec := core.ReconcileProvider(p, pData.gw, pData.org)
+		totalGw += rec.GatewaySpendMicros
+		totalOrg += rec.OrgSpendMicros
+		totalOverlap += rec.OverlapMicros
+		totalDiscrepancy += rec.DiscrepancyMicros
+		totalReconciled += rec.ReconciledSpendMicros
+	}
+	return core.ProviderReconciliation{
+		Provider:              p,
+		GatewaySpendMicros:    totalGw,
+		OrgSpendMicros:        totalOrg,
+		OverlapMicros:         totalOverlap,
+		DiscrepancyMicros:     totalDiscrepancy,
+		ReconciledSpendMicros: totalReconciled,
+	}
+}
+
+func buildReconciliation(aggs []store.DailyAggregate) core.ReconciliationReport {
+	dailyProv, allProviders := aggregateDailyProviderCosts(aggs)
+
+	report := core.ReconciliationReport{
+		ByProvider: make(map[string]core.ProviderReconciliation),
+	}
+
+	for p := range allProviders {
+		pRec := reconcileProviderAcrossDays(dailyProv, p)
+		report.ByProvider[p] = pRec
+		report.TotalGatewayMicros += pRec.GatewaySpendMicros
+		report.TotalOrgMicros += pRec.OrgSpendMicros
+		report.TotalOverlapMicros += pRec.OverlapMicros
+		report.TotalDiscrepancyMicros += pRec.DiscrepancyMicros
+		report.TotalReconciledMicros += pRec.ReconciledSpendMicros
+	}
+
+	return report
+}
+
+type dayData struct {
+	requests int64
+	tokens   int64
+	gwCost   map[string]int64
+	orgCost  map[string]int64
+}
+
+func (d *dayData) calculateSpend() int64 {
+	allProviders := make(map[string]bool)
+	for p := range d.gwCost {
+		allProviders[p] = true
+	}
+	for p := range d.orgCost {
+		allProviders[p] = true
+	}
+	var daySpend int64
+	for p := range allProviders {
+		rec := core.ReconcileProvider(p, d.gwCost[p], d.orgCost[p])
+		daySpend += rec.ReconciledSpendMicros
+	}
+	return daySpend
+}
+
+func (d *dayData) addAggregate(a store.DailyAggregate) {
+	tokens := a.InputTokens + a.OutputTokens + a.CacheReadTokens + a.CacheWriteTokens
+	d.requests += a.Requests
+	d.tokens += tokens
+
+	if a.CostKind != string(core.CostKindCobrado) {
+		return
+	}
+	if a.Source == string(core.SourceGateway) {
+		d.gwCost[a.Provider] += a.CostMicros
+	} else if a.Source == string(core.SourceAnthropicOrg) || a.Source == string(core.SourceOpenAIOrg) {
+		d.orgCost[a.Provider] += a.CostMicros
+	}
 }
 
 func buildDailyBreakdown(aggs []store.DailyAggregate) []DailyItem {
-	dateMap := make(map[string]*DailyItem)
+	daysMap := make(map[string]*dayData)
 
 	for _, a := range aggs {
-		item, exists := dateMap[a.Date]
+		d, exists := daysMap[a.Date]
 		if !exists {
-			item = &DailyItem{Date: a.Date}
-			dateMap[a.Date] = item
+			d = &dayData{
+				gwCost:  make(map[string]int64),
+				orgCost: make(map[string]int64),
+			}
+			daysMap[a.Date] = d
 		}
-		tokens := a.InputTokens + a.OutputTokens + a.CacheReadTokens + a.CacheWriteTokens
-		item.Requests += a.Requests
-		item.Tokens += tokens
-		if a.CostKind == string(core.CostKindCobrado) {
-			item.SpendMicros += a.CostMicros
-		}
+		d.addAggregate(a)
 	}
 
 	var results []DailyItem
-	for _, item := range dateMap {
-		results = append(results, *item)
+	for date, d := range daysMap {
+		results = append(results, DailyItem{
+			Date:        date,
+			SpendMicros: d.calculateSpend(),
+			Requests:    d.requests,
+			Tokens:      d.tokens,
+		})
 	}
 
 	sort.Slice(results, func(i, j int) bool {
@@ -197,7 +315,7 @@ func buildModelBreakdown(aggs []store.DailyAggregate) []ModelItem {
 	modelMap := make(map[string]*ModelItem)
 
 	for _, a := range aggs {
-		if a.Model == "" {
+		if a.Model == "" || a.Source != string(core.SourceGateway) {
 			continue
 		}
 		item, exists := modelMap[a.Model]
@@ -257,7 +375,7 @@ func buildKeyBreakdown(aggs []store.DailyAggregate) []KeyItem {
 	return results
 }
 
-func buildProviderBreakdown(aggs []store.DailyAggregate) []ProviderItem {
+func buildProviderBreakdown(aggs []store.DailyAggregate, rec core.ReconciliationReport) []ProviderItem {
 	provMap := make(map[string]*ProviderItem)
 
 	for _, a := range aggs {
@@ -272,13 +390,13 @@ func buildProviderBreakdown(aggs []store.DailyAggregate) []ProviderItem {
 		tokens := a.InputTokens + a.OutputTokens + a.CacheReadTokens + a.CacheWriteTokens
 		item.Requests += a.Requests
 		item.Tokens += tokens
-		if a.CostKind == string(core.CostKindCobrado) {
-			item.SpendMicros += a.CostMicros
-		}
 	}
 
 	var results []ProviderItem
-	for _, item := range provMap {
+	for prov, item := range provMap {
+		if r, ok := rec.ByProvider[prov]; ok {
+			item.SpendMicros = r.ReconciledSpendMicros
+		}
 		results = append(results, *item)
 	}
 
@@ -289,18 +407,37 @@ func buildProviderBreakdown(aggs []store.DailyAggregate) []ProviderItem {
 	return results
 }
 
-func buildSubscriptionSummary(subs []store.Subscription, aggs []store.DailyAggregate) []SubscriptionItem {
-	equivByProvider := make(map[string]int64)
-
-	for _, a := range aggs {
-		if a.CostKind == string(core.CostKindEquivalente) {
-			equivByProvider[a.Provider] += a.CostMicros
+func subscriptionCycleStart(asOf time.Time, renewalDay int) time.Time {
+	if renewalDay <= 0 {
+		renewalDay = 1
+	}
+	year := asOf.Year()
+	month := asOf.Month()
+	if renewalDay > asOf.Day() {
+		month--
+		if month < time.January {
+			month = time.December
+			year--
 		}
 	}
+	daysInCycleMonth := core.DaysInMonth(time.Date(year, month, 1, 0, 0, 0, 0, time.UTC))
+	day := renewalDay
+	if day > daysInCycleMonth {
+		day = daysInCycleMonth
+	}
+	return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+}
 
+func buildSubscriptionSummary(subs []store.Subscription, aggs []store.DailyAggregate, asOf time.Time, endDate string) []SubscriptionItem {
 	var results []SubscriptionItem
 	for _, s := range subs {
-		equiv := equivByProvider[s.Provider]
+		cycleStartStr := subscriptionCycleStart(asOf, s.RenewalDay).Format("2006-01-02")
+		var equiv int64
+		for _, a := range aggs {
+			if a.Date >= cycleStartStr && a.Date <= endDate && a.CostKind == string(core.CostKindEquivalente) && a.Provider == s.Provider {
+				equiv += a.CostMicros
+			}
+		}
 		aproveitamento := core.CalculateAproveitamento(equiv, s.MonthlyCostMicros)
 		results = append(results, SubscriptionItem{
 			ID:                    s.ID,
@@ -313,22 +450,4 @@ func buildSubscriptionSummary(subs []store.Subscription, aggs []store.DailyAggre
 	}
 
 	return results
-}
-
-func buildReconciliation(aggs []store.DailyAggregate) core.ReconciliationReport {
-	gwByProvider := make(map[string]int64)
-	orgByProvider := make(map[string]int64)
-
-	for _, a := range aggs {
-		if a.CostKind != string(core.CostKindCobrado) {
-			continue
-		}
-		if a.Source == string(core.SourceGateway) {
-			gwByProvider[a.Provider] += a.CostMicros
-		} else if a.Source == string(core.SourceAnthropicOrg) || a.Source == string(core.SourceOpenAIOrg) {
-			orgByProvider[a.Provider] += a.CostMicros
-		}
-	}
-
-	return core.ReconcileAll(gwByProvider, orgByProvider)
 }

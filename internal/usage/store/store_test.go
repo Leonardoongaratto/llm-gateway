@@ -231,29 +231,50 @@ func testAuditEvents(ctx context.Context, t *testing.T, s *store.Store) {
 	}
 }
 
-func testProcessedMessages(ctx context.Context, t *testing.T, s *store.Store) {
-	msgID := "msg-100"
-	stream := "LGW_EVENTS"
-	consumer := "usage_consumer"
-
-	processed, err := s.IsMessageProcessed(ctx, stream, consumer, msgID)
-	if err != nil || processed {
-		t.Fatalf("expected message not processed yet: %v", processed)
+func testOrgSnapshotUpserts(ctx context.Context, t *testing.T, s *store.Store) {
+	now := time.Date(2026, 10, 25, 10, 0, 0, 0, time.UTC)
+	rec := store.UsageRecord{
+		RequestID:  "org-ant-2026-10-25-claude-3-5-sonnet",
+		ModelUsed:  "claude-3-5-sonnet",
+		Provider:   "anthropic",
+		Source:     "anthropic-org",
+		CostKind:   "cobrado",
+		CostMicros: 10000000,
+		CreatedAt:  now,
 	}
 
-	firstTry, err := s.TryProcessMessage(ctx, stream, consumer, msgID)
-	if err != nil || !firstTry {
-		t.Fatalf("expected first try to succeed: %v", firstTry)
+	inserted, err := s.RecordUsage(ctx, rec)
+	if err != nil || !inserted {
+		t.Fatalf("first org snapshot failed: %v", err)
 	}
 
-	secondTry, err := s.TryProcessMessage(ctx, stream, consumer, msgID)
-	if err != nil || secondTry {
-		t.Fatalf("expected second try to return false: %v", secondTry)
+	aggs, err := s.QueryDailyAggregates(ctx, "2026-10-25", "2026-10-25")
+	if err != nil || len(aggs) != 1 || aggs[0].CostMicros != 10000000 {
+		t.Fatalf("expected aggregate 10M, got: %+v", aggs)
 	}
 
-	processedAfter, err := s.IsMessageProcessed(ctx, stream, consumer, msgID)
-	if err != nil || !processedAfter {
-		t.Fatalf("expected message to be processed: %v", processedAfter)
+	// Later snapshot on same day with higher cost
+	recLater := rec
+	recLater.CostMicros = 25000000
+	updated, err := s.RecordUsage(ctx, recLater)
+	if err != nil || !updated {
+		t.Fatalf("later org snapshot update failed: %v", err)
+	}
+
+	aggsLater, err := s.QueryDailyAggregates(ctx, "2026-10-25", "2026-10-25")
+	if err != nil || len(aggsLater) != 1 || aggsLater[0].CostMicros != 25000000 {
+		t.Fatalf("expected aggregate to update to 25M, got: %+v", aggsLater)
+	}
+
+	// Idempotent retry with same cost
+	retry, err := s.RecordUsage(ctx, recLater)
+	if err != nil || retry {
+		t.Fatalf("expected idempotent retry to return false, got %v", retry)
+	}
+
+	aggsRetry, err := s.QueryDailyAggregates(ctx, "2026-10-25", "2026-10-25")
+	if err != nil || len(aggsRetry) != 1 || aggsRetry[0].CostMicros != 25000000 {
+		t.Fatalf("expected aggregate to stay 25M on retry, got: %+v", aggsRetry)
 	}
 }
 
@@ -289,11 +310,6 @@ func testImportCursors(ctx context.Context, t *testing.T, s *store.Store) {
 	gotUpdated, err := s.GetCursor(ctx, cursor.Source, cursor.FilePath)
 	if err != nil || gotUpdated.ByteOffset != 2048 {
 		t.Fatalf("cursor offset not updated: %+v", gotUpdated)
-	}
-
-	cursors, err := s.ListCursors(ctx, cursor.Source)
-	if err != nil || len(cursors) != 1 {
-		t.Fatalf("failed to list cursors: %v", err)
 	}
 }
 
@@ -398,8 +414,8 @@ func runAllStoreContractTests(t *testing.T, db *sql.DB) {
 	t.Run("Audit Events", func(t *testing.T) {
 		testAuditEvents(ctx, t, s)
 	})
-	t.Run("Processed Messages Idempotency", func(t *testing.T) {
-		testProcessedMessages(ctx, t, s)
+	t.Run("Org Snapshot Upserts", func(t *testing.T) {
+		testOrgSnapshotUpserts(ctx, t, s)
 	})
 	t.Run("Import Cursors", func(t *testing.T) {
 		testImportCursors(ctx, t, s)

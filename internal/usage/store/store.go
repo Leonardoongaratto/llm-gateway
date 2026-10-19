@@ -151,23 +151,14 @@ func (s *Store) RecordUsage(ctx context.Context, req UsageRecord) (bool, error) 
 		_ = tx.Rollback()
 	}()
 
-	inserted, err := s.insertUsageTx(ctx, tx, req)
+	inserted, err := s.processRecordTx(ctx, tx, req)
 	if err != nil {
 		return false, err
 	}
-	if !inserted {
-		return false, nil
-	}
-
-	dateStr := req.CreatedAt.UTC().Format("2006-01-02")
-	if err := s.upsertDailyAggregateTx(ctx, tx, dateStr, req); err != nil {
-		return false, err
-	}
-
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("failed to commit tx: %w", err)
 	}
-	return true, nil
+	return inserted, nil
 }
 
 func (s *Store) RecordUsageBatch(ctx context.Context, records []UsageRecord) (int, error) {
@@ -188,24 +179,72 @@ func (s *Store) RecordUsageBatch(ctx context.Context, records []UsageRecord) (in
 
 	insertedCount := 0
 	for _, req := range records {
-		inserted, err := s.insertUsageTx(ctx, tx, req)
+		inserted, err := s.processRecordTx(ctx, tx, req)
 		if err != nil {
 			return 0, err
 		}
-		if !inserted {
-			continue
+		if inserted {
+			insertedCount++
 		}
-		dateStr := req.CreatedAt.UTC().Format("2006-01-02")
-		if err := s.upsertDailyAggregateTx(ctx, tx, dateStr, req); err != nil {
-			return 0, err
-		}
-		insertedCount++
 	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("failed to commit tx: %w", err)
 	}
 	return insertedCount, nil
+}
+
+func (s *Store) updateOrgCostDiffTx(ctx context.Context, tx *sql.Tx, dateStr string, req UsageRecord, diff int64) error {
+	_, err := tx.ExecContext(ctx, `UPDATE usage_requests SET cost_micros = $1, input_tokens = $2, output_tokens = $3 WHERE request_id = $4`,
+		req.CostMicros, req.InputTokens, req.OutputTokens, req.RequestID)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	_, err = tx.ExecContext(ctx, `UPDATE daily_aggregates SET cost_micros = daily_aggregates.cost_micros + $1, updated_at = $2
+		WHERE date = $3 AND model = $4 AND provider = $5 AND source = $6 AND cost_kind = $7`,
+		diff, now, dateStr, req.ModelUsed, req.Provider, req.Source, req.CostKind)
+	return err
+}
+
+func (s *Store) processOrgSnapshotTx(ctx context.Context, tx *sql.Tx, dateStr string, req UsageRecord) (bool, error) {
+	var existingCost int64
+	err := tx.QueryRowContext(ctx, "SELECT cost_micros FROM usage_requests WHERE request_id = $1", req.RequestID).Scan(&existingCost)
+	if errors.Is(err, sql.ErrNoRows) {
+		return s.processStandardRecordTx(ctx, tx, dateStr, req)
+	}
+	if err != nil {
+		return false, err
+	}
+
+	diff := req.CostMicros - existingCost
+	if diff <= 0 {
+		return false, nil
+	}
+
+	if err := s.updateOrgCostDiffTx(ctx, tx, dateStr, req, diff); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) processStandardRecordTx(ctx context.Context, tx *sql.Tx, dateStr string, req UsageRecord) (bool, error) {
+	inserted, err := s.insertUsageTx(ctx, tx, req)
+	if err != nil || !inserted {
+		return false, err
+	}
+	if err := s.upsertDailyAggregateTx(ctx, tx, dateStr, req); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) processRecordTx(ctx context.Context, tx *sql.Tx, req UsageRecord) (bool, error) {
+	dateStr := req.CreatedAt.UTC().Format("2006-01-02")
+	if req.Source == "anthropic-org" || req.Source == "openai-org" {
+		return s.processOrgSnapshotTx(ctx, tx, dateStr, req)
+	}
+	return s.processStandardRecordTx(ctx, tx, dateStr, req)
 }
 
 func (s *Store) insertUsageTx(ctx context.Context, tx *sql.Tx, req UsageRecord) (bool, error) {
@@ -278,39 +317,6 @@ VALUES ($1, $2, $3, $4, $5)`
 	return nil
 }
 
-func (s *Store) TryProcessMessage(ctx context.Context, stream, consumer, messageID string) (bool, error) {
-	unlock := s.lockSQLite()
-	defer unlock()
-
-	query := `
-INSERT INTO processed_messages (message_id, stream, consumer, processed_at)
-VALUES ($1, $2, $3, $4)
-ON CONFLICT (message_id) DO NOTHING`
-
-	res, err := s.db.ExecContext(ctx, query, messageID, stream, consumer, time.Now().UTC())
-	if err != nil {
-		return false, fmt.Errorf("failed to try process message: %w", err)
-	}
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return rows > 0, nil
-}
-
-func (s *Store) IsMessageProcessed(ctx context.Context, stream, consumer, messageID string) (bool, error) {
-	query := `
-SELECT COUNT(*) FROM processed_messages
-WHERE message_id = $1 AND stream = $2 AND consumer = $3`
-
-	var count int
-	err := s.db.QueryRowContext(ctx, query, messageID, stream, consumer).Scan(&count)
-	if err != nil {
-		return false, fmt.Errorf("failed to check processed message: %w", err)
-	}
-	return count > 0, nil
-}
-
 func (s *Store) UpsertCursor(ctx context.Context, cursor ImportCursor) error {
 	unlock := s.lockSQLite()
 	defer unlock()
@@ -349,33 +355,6 @@ WHERE source = $1 AND file_path = $2`
 		return nil, fmt.Errorf("failed to get import cursor: %w", err)
 	}
 	return &c, nil
-}
-
-func (s *Store) ListCursors(ctx context.Context, source string) ([]ImportCursor, error) {
-	query := `
-SELECT source, file_path, byte_offset, last_line, updated_at
-FROM import_cursors
-WHERE source = $1
-ORDER BY file_path ASC`
-
-	rows, err := s.db.QueryContext(ctx, query, source)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list import cursors: %w", err)
-	}
-	defer rows.Close()
-
-	var results []ImportCursor
-	for rows.Next() {
-		var c ImportCursor
-		if err := rows.Scan(&c.Source, &c.FilePath, &c.ByteOffset, &c.LastLine, &c.UpdatedAt); err != nil {
-			return nil, err
-		}
-		results = append(results, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return results, nil
 }
 
 func (s *Store) CreateImportRun(ctx context.Context, run ImportRun) error {
@@ -497,7 +476,13 @@ func (s *Store) CreateSubscription(ctx context.Context, sub Subscription) error 
 
 	query := `
 INSERT INTO subscriptions (id, name, provider, monthly_cost_micros, renewal_day, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)`
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (id) DO UPDATE SET
+    name = EXCLUDED.name,
+    provider = EXCLUDED.provider,
+    monthly_cost_micros = EXCLUDED.monthly_cost_micros,
+    renewal_day = EXCLUDED.renewal_day,
+    updated_at = EXCLUDED.updated_at`
 
 	_, err := s.db.ExecContext(ctx, query,
 		sub.ID, sub.Name, sub.Provider, sub.MonthlyCostMicros, sub.RenewalDay,

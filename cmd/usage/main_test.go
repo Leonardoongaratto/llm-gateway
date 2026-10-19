@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -125,25 +126,38 @@ func TestUsage_RealMain_RunErrorReturnsOne(t *testing.T) {
 }
 
 func TestUsage_RealMain_SeedDemoFlag(t *testing.T) {
+	tempOut := filepath.Join(t.TempDir(), "summary.test.json")
+	t.Setenv("LGW_SEED_OUTPUT_PATH", tempOut)
+	t.Setenv("LGW_DATABASE_DSN", ":memory:")
+
 	code := realMain([]string{"--seed-demo"})
 	if code != 0 {
 		t.Fatalf("expected realMain(--seed-demo) to return 0, got %d", code)
+	}
+
+	data, err := os.ReadFile(tempOut)
+	if err != nil {
+		t.Fatalf("failed to read generated summary: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "Claude Code Pro") {
+		t.Errorf("expected subscription in summary.test.json, got: %s", content)
+	}
+	if !strings.Contains(content, `"aproveitamento": 4.2`) {
+		t.Errorf("expected aproveitamento 4.2 in summary.test.json, got: %s", content)
 	}
 
 	targetPath := "docs/summary.example.json"
 	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
 		targetPath = "../../docs/summary.example.json"
 	}
-	data, err := os.ReadFile(targetPath)
-	if err != nil {
-		t.Fatalf("failed to read generated summary.example.json: %v", err)
-	}
-	content := string(data)
-	if !strings.Contains(content, "Claude Code Pro") {
-		t.Errorf("expected subscription in summary.example.json, got: %s", content)
-	}
-	if !strings.Contains(content, `"aproveitamento": 4.2`) {
-		t.Errorf("expected aproveitamento 4.2 in summary.example.json, got: %s", content)
+	golden, err := os.ReadFile(targetPath)
+	if err == nil {
+		goldenNorm := bytes.ReplaceAll(golden, []byte("\r\n"), []byte("\n"))
+		dataNorm := bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
+		if !bytes.Equal(dataNorm, goldenNorm) {
+			t.Errorf("generated output differs from golden docs/summary.example.json")
+		}
 	}
 }
 
