@@ -437,10 +437,6 @@ func TestManager_StartConfigWatcher(t *testing.T) {
 	}
 	defer sub.Stop()
 
-	// Give consumer worker a moment to initialize subscription
-	time.Sleep(50 * time.Millisecond)
-
-	// Update mock snapshot with new version & key
 	mockClient.setSnapshot(&controlv1.Snapshot{
 		Version: 2,
 		Keys: []*controlv1.KeyInfo{
@@ -457,7 +453,6 @@ func TestManager_StartConfigWatcher(t *testing.T) {
 		},
 	})
 
-	// Publish config.changed event
 	cfgEvt := &eventsv1.ConfigChanged{
 		Kind:    eventsv1.ConfigChanged_KEY,
 		Version: 2,
@@ -472,7 +467,6 @@ func TestManager_StartConfigWatcher(t *testing.T) {
 		t.Fatalf("failed to publish config changed event: %v", err)
 	}
 
-	// Wait for snapshot update (up to 2 seconds as required by AC-16, AC-34)
 	deadline := time.Now().Add(2 * time.Second)
 	var updated bool
 	for time.Now().Before(deadline) {
