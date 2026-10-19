@@ -1,0 +1,215 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lgw-postgres
+    environment:
+      POSTGRES_USER: lgw
+      POSTGRES_PASSWORD: lgwpass
+      POSTGRES_DB: lgw
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lgw -d lgw"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 2s
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: lgw-nats
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:8222/healthz || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 2s
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    container_name: lgw-jaeger
+    ports:
+      - "16686:16686" # Web UI
+      - "4318:4318"   # OTLP HTTP receiver
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+
+  prometheus:
+    image: prom/prometheus:v2.54.0
+    container_name: lgw-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - edge
+
+  control:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        TARGET: control
+    container_name: lgw-control
+    environment:
+      SERVICE_NAME: control
+      HTTP_PORT: 8790
+      GRPC_PORT: 9102
+      DATABASE_DRIVER: postgres
+      DATABASE_DSN: "postgres://lgw:lgwpass@postgres:5432/lgw_control?sslmode=disable"
+      NATS_URL: "nats://nats:4222"
+      ADMIN_TOKEN: "compose-admin-token"
+      KEY_PEPPER: "compose-pepper-secret-32-chars!"
+      OTEL_ENDPOINT: "http://jaeger:4318"
+      LOG_LEVEL: "info"
+    ports:
+      - "8790:8790"
+      - "9102:9102"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8790/livez"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+  budget:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        TARGET: budget
+    container_name: lgw-budget
+    environment:
+      SERVICE_NAME: budget
+      HTTP_PORT: 8792
+      GRPC_PORT: 9101
+      DATABASE_DRIVER: postgres
+      DATABASE_DSN: "postgres://lgw:lgwpass@postgres:5432/lgw_budget?sslmode=disable"
+      NATS_URL: "nats://nats:4222"
+      ADMIN_TOKEN: "compose-admin-token"
+      OTEL_ENDPOINT: "http://jaeger:4318"
+      LOG_LEVEL: "info"
+    ports:
+      - "8792:8792"
+      - "9101:9101"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8792/livez"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+  usage:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        TARGET: usage
+    container_name: lgw-usage
+    environment:
+      SERVICE_NAME: usage
+      HTTP_PORT: 8791
+      DATABASE_DRIVER: postgres
+      DATABASE_DSN: "postgres://lgw:lgwpass@postgres:5432/lgw_usage?sslmode=disable"
+      NATS_URL: "nats://nats:4222"
+      ADMIN_TOKEN: "compose-admin-token"
+      OTEL_ENDPOINT: "http://jaeger:4318"
+      LOG_LEVEL: "info"
+    ports:
+      - "8791:8791"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8791/livez"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        TARGET: gateway
+    container_name: lgw-gateway
+    environment:
+      SERVICE_NAME: gateway
+      HTTP_PORT: 8788
+      CONTROL_ADDR: "control:9102"
+      BUDGET_ADDR: "budget:9101"
+      NATS_URL: "nats://nats:4222"
+      KEY_PEPPER: "compose-pepper-secret-32-chars!"
+      OTEL_ENDPOINT: "http://jaeger:4318"
+      LOG_LEVEL: "info"
+    ports:
+      - "8788:8788"
+    depends_on:
+      control:
+        condition: service_healthy
+      budget:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8788/livez"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+  edge:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        TARGET: edge
+    container_name: lgw-edge
+    environment:
+      HTTP_PORT: 8787
+      GATEWAY_URL: "http://gateway:8788"
+      CONTROL_URL: "http://control:8790"
+      USAGE_URL: "http://usage:8791"
+      BUDGET_URL: "http://budget:8792"
+      OTEL_ENDPOINT: "http://jaeger:4318"
+      LOG_LEVEL: "info"
+    ports:
+      - "8787:8787"
+    depends_on:
+      gateway:
+        condition: service_healthy
+      control:
+        condition: service_healthy
+      usage:
+        condition: service_healthy
+      budget:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8787/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+volumes:
+  pgdata:
