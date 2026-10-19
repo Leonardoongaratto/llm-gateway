@@ -108,6 +108,15 @@ try {
     }
     Write-Host "  [OK] control: revoked key $($createdKey.id) -> HTTP 204"
 
+    Write-Host "==> Validating gateway routes..."
+    $gwBase = "http://127.0.0.1:8788"
+    $gwUnauth = & curl.exe -s -o /dev/null -w "%{http_code}" "$gwBase/v1/models"
+    if ($gwUnauth -ne "401") {
+        Write-Error "gateway GET /v1/models without key returned $gwUnauth (expected 401)"
+        exit 1
+    }
+    Write-Host "  [OK] gateway: unauthorized request correctly rejected with 401"
+
     Write-Host "==> All 5 services passed runtime verification successfully!"
 }
 finally {
