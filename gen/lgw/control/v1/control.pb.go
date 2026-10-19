@@ -59,15 +59,18 @@ func (*GetSnapshotRequest) Descriptor() ([]byte, []int) {
 }
 
 type KeyInfo struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	KeyHash       string                 `protobuf:"bytes,3,opt,name=key_hash,json=keyHash,proto3" json:"key_hash,omitempty"`
-	AllowedModels []string               `protobuf:"bytes,4,rep,name=allowed_models,json=allowedModels,proto3" json:"allowed_models,omitempty"`
-	Active        bool                   `protobuf:"varint,5,opt,name=active,proto3" json:"active,omitempty"`
-	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Id                 string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Name               string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	KeyHash            string                 `protobuf:"bytes,3,opt,name=key_hash,json=keyHash,proto3" json:"key_hash,omitempty"`
+	AllowedModels      []string               `protobuf:"bytes,4,rep,name=allowed_models,json=allowedModels,proto3" json:"allowed_models,omitempty"`
+	Active             bool                   `protobuf:"varint,5,opt,name=active,proto3" json:"active,omitempty"`
+	ExpiresAt          *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	DailyLimitMicros   int64                  `protobuf:"varint,7,opt,name=daily_limit_micros,json=dailyLimitMicros,proto3" json:"daily_limit_micros,omitempty"`
+	MonthlyLimitMicros int64                  `protobuf:"varint,8,opt,name=monthly_limit_micros,json=monthlyLimitMicros,proto3" json:"monthly_limit_micros,omitempty"`
+	Rpm                int32                  `protobuf:"varint,9,opt,name=rpm,proto3" json:"rpm,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *KeyInfo) Reset() {
@@ -140,6 +143,27 @@ func (x *KeyInfo) GetExpiresAt() *timestamppb.Timestamp {
 		return x.ExpiresAt
 	}
 	return nil
+}
+
+func (x *KeyInfo) GetDailyLimitMicros() int64 {
+	if x != nil {
+		return x.DailyLimitMicros
+	}
+	return 0
+}
+
+func (x *KeyInfo) GetMonthlyLimitMicros() int64 {
+	if x != nil {
+		return x.MonthlyLimitMicros
+	}
+	return 0
+}
+
+func (x *KeyInfo) GetRpm() int32 {
+	if x != nil {
+		return x.Rpm
+	}
+	return 0
 }
 
 type PricingInfo struct {
@@ -351,7 +375,7 @@ var File_lgw_control_v1_control_proto protoreflect.FileDescriptor
 const file_lgw_control_v1_control_proto_rawDesc = "" +
 	"\n" +
 	"\x1clgw/control/v1/control.proto\x12\x0elgw.control.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x14\n" +
-	"\x12GetSnapshotRequest\"\xc2\x01\n" +
+	"\x12GetSnapshotRequest\"\xb4\x02\n" +
 	"\aKeyInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x19\n" +
@@ -359,7 +383,10 @@ const file_lgw_control_v1_control_proto_rawDesc = "" +
 	"\x0eallowed_models\x18\x04 \x03(\tR\rallowedModels\x12\x16\n" +
 	"\x06active\x18\x05 \x01(\bR\x06active\x129\n" +
 	"\n" +
-	"expires_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"\xa1\x02\n" +
+	"expires_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12,\n" +
+	"\x12daily_limit_micros\x18\a \x01(\x03R\x10dailyLimitMicros\x120\n" +
+	"\x14monthly_limit_micros\x18\b \x01(\x03R\x12monthlyLimitMicros\x12\x10\n" +
+	"\x03rpm\x18\t \x01(\x05R\x03rpm\"\xa1\x02\n" +
 	"\vPricingInfo\x12\x14\n" +
 	"\x05model\x18\x01 \x01(\tR\x05model\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x121\n" +
