@@ -636,7 +636,7 @@ func (c *Cluster) startGatewayInstance(ctx context.Context, port int, name strin
 
 	server := &http.Server{
 		Addr:              fmt.Sprintf("127.0.0.1:%d", port),
-		Handler:           mux,
+		Handler:           otel.HTTPHandler(mux, name),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -693,7 +693,7 @@ func (c *Cluster) startEdge(ctx context.Context) error {
 
 	server := &http.Server{
 		Addr:              fmt.Sprintf("127.0.0.1:%d", c.cfg.EdgePort),
-		Handler:           mux,
+		Handler:           otel.HTTPHandler(mux, "edge"),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

@@ -115,7 +115,7 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 
 	server := &http.Server{
 		Addr:              fmt.Sprintf("127.0.0.1:%d", cfg.HTTPPort),
-		Handler:           mux,
+		Handler:           otel.HTTPHandler(mux, "edge"),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

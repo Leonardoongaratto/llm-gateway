@@ -70,7 +70,7 @@ func buildHTTPMux(checker *health.Checker, otelProvider *otel.Provider, register
 func startHTTP(cfg Config, logger *slog.Logger, mux *http.ServeMux) (*http.Server, <-chan error) {
 	httpServer := &http.Server{
 		Addr:              fmt.Sprintf("127.0.0.1:%d", cfg.HTTPPort),
-		Handler:           mux,
+		Handler:           otel.HTTPHandler(mux, cfg.ServiceName),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

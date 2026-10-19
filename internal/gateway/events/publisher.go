@@ -20,6 +20,7 @@ const (
 )
 
 type eventTask struct {
+	ctx     context.Context
 	subject string
 	msgID   string
 	payload []byte
@@ -79,8 +80,12 @@ func (p *Publisher) worker() {
 	defer p.wg.Done()
 
 	for task := range p.queue {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if _, err := natsx.Publish(ctx, p.js, task.subject, task.payload, task.msgID); err != nil {
+		ctx := task.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		pubCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		if _, err := natsx.Publish(pubCtx, p.js, task.subject, task.payload, task.msgID); err != nil {
 			p.logger.Error("failed to publish jetstream event",
 				slog.String("subject", task.subject),
 				slog.String("msg_id", task.msgID),
@@ -92,7 +97,7 @@ func (p *Publisher) worker() {
 }
 
 // PublishUsage publishes a usage.recorded event without blocking the caller.
-func (p *Publisher) PublishUsage(_ context.Context, evt *eventsv1.UsageRecorded) {
+func (p *Publisher) PublishUsage(ctx context.Context, evt *eventsv1.UsageRecorded) {
 	if evt == nil || p.js == nil {
 		return
 	}
@@ -106,14 +111,14 @@ func (p *Publisher) PublishUsage(_ context.Context, evt *eventsv1.UsageRecorded)
 
 	msgID := fmt.Sprintf("usage-%s", evt.RequestId)
 	select {
-	case p.queue <- eventTask{subject: SubjectUsage, msgID: msgID, payload: payload}:
+	case p.queue <- eventTask{ctx: ctx, subject: SubjectUsage, msgID: msgID, payload: payload}:
 	default:
 		p.logger.Warn("event queue full, dropping usage event", slog.String("request_id", evt.RequestId))
 	}
 }
 
 // PublishFallback publishes a provider.fallback event without blocking the caller.
-func (p *Publisher) PublishFallback(_ context.Context, evt *eventsv1.ProviderFallback) {
+func (p *Publisher) PublishFallback(ctx context.Context, evt *eventsv1.ProviderFallback) {
 	if evt == nil || p.js == nil {
 		return
 	}
@@ -127,7 +132,7 @@ func (p *Publisher) PublishFallback(_ context.Context, evt *eventsv1.ProviderFal
 
 	msgID := fmt.Sprintf("fallback-%s-%s-%d", evt.RequestId, evt.ToProvider, time.Now().UnixNano())
 	select {
-	case p.queue <- eventTask{subject: SubjectFallback, msgID: msgID, payload: payload}:
+	case p.queue <- eventTask{ctx: ctx, subject: SubjectFallback, msgID: msgID, payload: payload}:
 	default:
 		p.logger.Warn("event queue full, dropping fallback event", slog.String("request_id", evt.RequestId))
 	}

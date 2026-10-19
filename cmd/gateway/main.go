@@ -324,7 +324,7 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 	apiHandler := api.NewHandler(svc, activeAuthMgr)
 	apiHandler.RegisterRoutes(mux)
 
-	return startHTTPServer(ctx, cfg.HTTPPort, mux, logger)
+	return startHTTPServer(ctx, cfg.HTTPPort, otel.HTTPHandler(mux, "gateway"), logger)
 }
 
 func startHTTPServer(ctx context.Context, port int, handler http.Handler, logger *slog.Logger) error {
