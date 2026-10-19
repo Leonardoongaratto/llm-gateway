@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/provider"
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/provider/openai"
@@ -232,5 +233,40 @@ func TestOpenAIAdapter_Do_TruncatedJSON_Returns502Retryable(t *testing.T) {
 	}
 	if !upstreamErr.Retryable {
 		t.Errorf("expected truncated JSON error to be retryable")
+	}
+}
+
+func TestOpenAIAdapter_Do_BodyReadCancel_ReturnsCanceled(t *testing.T) {
+	blockCh := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-blockCh
+	}))
+	defer func() {
+		close(blockCh)
+		ts.Close()
+	}()
+
+	adapter := openai.New("key", openai.WithBaseURL(ts.URL))
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := adapter.Do(ctx, &llm.Request{Model: "gpt-4o"})
+	if err == nil {
+		t.Fatal("expected error on canceled context, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled error, got %v", err)
+	}
+	if provider.IsRetryable(err) {
+		t.Errorf("canceled context error must NOT be retryable UpstreamError")
 	}
 }

@@ -925,3 +925,89 @@ func TestAPI_UpstreamTruncatedJSON_Returns502(t *testing.T) {
 		t.Errorf("expected error code 'all_providers_failed', got %v", errObj["code"])
 	}
 }
+
+func TestAPI_UpstreamTruncatedJSON_FallbackToSecondary(t *testing.T) {
+	primaryUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":`))
+	}))
+	defer primaryUpstream.Close()
+
+	authMgr, _ := auth.NewManager(testPepper, nil)
+	keyHash := hashKey(testRawKey, testPepper)
+
+	authMgr.UpdateSnapshot(&auth.Snapshot{
+		Version: 1,
+		KeysByHash: map[string]*auth.KeyInfo{
+			keyHash: {
+				ID:            "key-api-1",
+				AllowedModels: []string{"smart-route", "primary-model", "fallback-model"},
+				Active:        true,
+			},
+		},
+		Pricing: map[string]*auth.PricingInfo{
+			"primary-model": {
+				Model:               "primary-model",
+				Provider:            "primary-prov",
+				InputPerMTokMicros:  1_000_000,
+				OutputPerMTokMicros: 2_000_000,
+			},
+			"fallback-model": {
+				Model:               "fallback-model",
+				Provider:            "fallback-prov",
+				InputPerMTokMicros:  1_000_000,
+				OutputPerMTokMicros: 2_000_000,
+			},
+		},
+		LogicalModels: map[string][]string{
+			"smart-route": {"primary-model", "fallback-model"},
+		},
+	})
+
+	mockBudget := &mockBudgetClient{}
+	localCache := cache.New(cache.WithCapacity(100), cache.WithTTL(5*time.Minute))
+	r := router.New()
+	p1 := openai.New("key", openai.WithName("primary-prov"), openai.WithBaseURL(primaryUpstream.URL))
+	p2 := fake.New(
+		fake.WithName("fallback-prov"),
+		fake.WithContent("Answer from fallback"),
+		fake.WithUsage(llm.Usage{InputTokens: 10, OutputTokens: 10}),
+	)
+	r.Register("primary-model", p1)
+	r.Register("fallback-model", p2)
+
+	svc := core.NewService(core.ServiceConfig{
+		AuthManager:    authMgr,
+		BudgetClient:   mockBudget,
+		EventPublisher: &mockEventPublisher{},
+		LocalCache:     localCache,
+		Router:         r,
+	})
+
+	handler := api.NewHandler(svc, authMgr)
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := bytes.NewBufferString(`{"model":"smart-route","messages":[{"role":"user","content":"hello"}]}`)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/chat/completions", body)
+	req.Header.Set("Authorization", "Bearer "+testRawKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK after fallback from truncated JSON, got %d", resp.StatusCode)
+	}
+
+	provHeader := resp.Header.Get("X-LGW-Provider")
+	if provHeader != "fallback-prov" {
+		t.Errorf("expected X-LGW-Provider to be 'fallback-prov', got %q", provHeader)
+	}
+}

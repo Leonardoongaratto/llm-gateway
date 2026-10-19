@@ -146,6 +146,40 @@ func parseOpenAIError(body []byte, statusCode int) error {
 	}
 }
 
+func mapNetworkError(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return err
+	}
+	statusCode := http.StatusBadGateway
+	if errors.Is(err, context.DeadlineExceeded) {
+		statusCode = http.StatusGatewayTimeout
+	}
+	return &provider.UpstreamError{
+		StatusCode: statusCode,
+		Message:    err.Error(),
+		Retryable:  true,
+	}
+}
+
+func readResponseBody(ctx context.Context, body io.Reader) ([]byte, error) {
+	respBody, err := io.ReadAll(body)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			return nil, context.Canceled
+		}
+		statusCode := http.StatusBadGateway
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			statusCode = http.StatusGatewayTimeout
+		}
+		return nil, &provider.UpstreamError{
+			StatusCode: statusCode,
+			Message:    "failed to read response body: " + err.Error(),
+			Retryable:  true,
+		}
+	}
+	return respBody, nil
+}
+
 // Do executes a synchronous completion request against the OpenAI Chat Completions API.
 func (a *Adapter) Do(ctx context.Context, req *llm.Request) (*llm.Response, error) {
 	start := time.Now()
@@ -186,28 +220,13 @@ func (a *Adapter) Do(ctx context.Context, req *llm.Request) (*llm.Response, erro
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return nil, err
-		}
-		statusCode := http.StatusBadGateway
-		if errors.Is(err, context.DeadlineExceeded) {
-			statusCode = http.StatusGatewayTimeout
-		}
-		return nil, &provider.UpstreamError{
-			StatusCode: statusCode,
-			Message:    err.Error(),
-			Retryable:  true,
-		}
+		return nil, mapNetworkError(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readResponseBody(ctx, resp.Body)
 	if err != nil {
-		return nil, &provider.UpstreamError{
-			StatusCode: http.StatusBadGateway,
-			Message:    "failed to read response body: " + err.Error(),
-			Retryable:  true,
-		}
+		return nil, err
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -381,18 +400,7 @@ func (a *Adapter) DoStream(ctx context.Context, req *llm.Request) (<-chan llm.Ch
 	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return nil, err
-		}
-		statusCode := http.StatusBadGateway
-		if errors.Is(err, context.DeadlineExceeded) {
-			statusCode = http.StatusGatewayTimeout
-		}
-		return nil, &provider.UpstreamError{
-			StatusCode: statusCode,
-			Message:    err.Error(),
-			Retryable:  true,
-		}
+		return nil, mapNetworkError(err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
