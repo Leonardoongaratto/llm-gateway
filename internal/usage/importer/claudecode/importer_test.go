@@ -345,3 +345,69 @@ func TestImporter_NonExistentDir(t *testing.T) {
 		t.Fatalf("expected non-existent dir to succeed with 0 imports: %+v, err=%v", run, err)
 	}
 }
+
+func TestImporter_IsEnabled(t *testing.T) {
+	st := setupTestStore(t)
+	tempDir := t.TempDir()
+
+	existingDir := filepath.Join(tempDir, "existing-dir")
+	if err := os.MkdirAll(existingDir, 0755); err != nil {
+		t.Fatalf("failed to create dir: %v", err)
+	}
+
+	regularFile := filepath.Join(tempDir, "regular-file.txt")
+	if err := os.WriteFile(regularFile, []byte("hello"), 0644); err != nil {
+		t.Fatalf("failed to create file: %v", err)
+	}
+
+	nonExistent := filepath.Join(tempDir, "does-not-exist")
+
+	tests := []struct {
+		name     string
+		dir      string
+		expected bool
+	}{
+		{name: "existing directory", dir: existingDir, expected: true},
+		{name: "non-existent path", dir: nonExistent, expected: false},
+		{name: "regular file", dir: regularFile, expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			imp := claudecode.New(st, tt.dir, nil)
+			if got := imp.IsEnabled(); got != tt.expected {
+				t.Errorf("IsEnabled() for %s = %v, expected %v", tt.name, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestImporter_IsEnabled_EnvAndDefault(t *testing.T) {
+	st := setupTestStore(t)
+	tempDir := t.TempDir()
+
+	t.Setenv("LGW_CLAUDE_CODE_DIR", tempDir)
+	imp := claudecode.New(st, "", nil)
+	if !imp.IsEnabled() {
+		t.Errorf("expected IsEnabled() = true when LGW_CLAUDE_CODE_DIR is valid dir")
+	}
+
+	t.Setenv("LGW_CLAUDE_CODE_DIR", filepath.Join(tempDir, "absent"))
+	impAbsent := claudecode.New(st, "", nil)
+	if impAbsent.IsEnabled() {
+		t.Errorf("expected IsEnabled() = false when LGW_CLAUDE_CODE_DIR is absent")
+	}
+
+	t.Setenv("LGW_CLAUDE_CODE_DIR", "")
+	mockHome := filepath.Join(tempDir, "mock-home")
+	t.Setenv("HOME", mockHome)
+	t.Setenv("USERPROFILE", mockHome)
+	defaultClaudeProjects := filepath.Join(mockHome, ".claude", "projects")
+	if err := os.MkdirAll(defaultClaudeProjects, 0755); err != nil {
+		t.Fatalf("failed to create default projects dir: %v", err)
+	}
+	impDefault := claudecode.New(st, "", nil)
+	if !impDefault.IsEnabled() {
+		t.Errorf("expected IsEnabled() = true with default ~/.claude/projects")
+	}
+}

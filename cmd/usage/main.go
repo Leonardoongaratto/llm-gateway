@@ -183,7 +183,7 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 		OpenAIAdminKey:    cfg.OpenAIAdminKey,
 	}, logger)
 
-	if cfg.ClaudeCodeDir != "" || cfg.AnthropicAdminKey != "" || cfg.OpenAIAdminKey != "" {
+	if claudeImporter.IsEnabled() || orgImporter.IsEnabled("anthropic-org") || orgImporter.IsEnabled("openai-org") {
 		go runPeriodicImports(ctx, 15*time.Minute, claudeImporter, orgImporter, logger)
 	}
 

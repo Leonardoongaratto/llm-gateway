@@ -75,7 +75,6 @@ func generateDemoRecords(asOf time.Time) []store.UsageRecord {
 		"key-mobile-api",
 	}
 
-	// 90 days backwards
 	for d := 90; d >= 0; d-- {
 		day := asOf.AddDate(0, 0, -d)
 		dateStr := day.Format("2006-01-02")
@@ -115,8 +114,6 @@ func generateDemoRecords(asOf time.Time) []store.UsageRecord {
 		}
 	}
 
-	// Seed Claude Code equivalent usage to achieve exact 84_000_000 micros in the 30-day period
-	// for aproveitamento = 4.2
 	records = append(records, store.UsageRecord{
 		RequestID:        "demo-ccl-target-month",
 		KeyID:            "",

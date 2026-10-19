@@ -411,9 +411,15 @@ func subscriptionCycleStart(asOf time.Time, renewalDay int) time.Time {
 	if renewalDay <= 0 {
 		renewalDay = 1
 	}
+	daysInCurrentMonth := core.DaysInMonth(asOf)
+	effectiveRenewalThisMonth := renewalDay
+	if effectiveRenewalThisMonth > daysInCurrentMonth {
+		effectiveRenewalThisMonth = daysInCurrentMonth
+	}
+
 	year := asOf.Year()
 	month := asOf.Month()
-	if renewalDay > asOf.Day() {
+	if effectiveRenewalThisMonth > asOf.Day() {
 		month--
 		if month < time.January {
 			month = time.December

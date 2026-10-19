@@ -91,40 +91,49 @@ type AnthropicCostReportResponse struct {
 	NextPage *string               `json:"next_page"`
 }
 
+const OrgTotalModel = "org-total"
+
 type OpenAICostAmount struct {
 	Value    float64 `json:"value"`
 	Currency string  `json:"currency"`
 }
 
-type OpenAICostItem struct {
+type OpenAICostResult struct {
+	Object    string           `json:"object"`
 	Amount    OpenAICostAmount `json:"amount"`
-	LineItem  string           `json:"line_item"`
-	ProjectID string           `json:"project_id"`
-	Timestamp int64            `json:"timestamp"`
+	LineItem  *string          `json:"line_item"`
+	ProjectID *string          `json:"project_id"`
+}
+
+type OpenAICostBucket struct {
+	Object    string             `json:"object"`
+	StartTime int64              `json:"start_time"`
+	EndTime   int64              `json:"end_time"`
+	Results   []OpenAICostResult `json:"results"`
 }
 
 type OpenAICostsResponse struct {
-	Object   string           `json:"object"`
-	Data     []OpenAICostItem `json:"data"`
-	HasMore  bool             `json:"has_more"`
-	NextPage *string          `json:"next_page"`
+	Object   string             `json:"object"`
+	Data     []OpenAICostBucket `json:"data"`
+	HasMore  bool               `json:"has_more"`
+	NextPage *string            `json:"next_page"`
 }
 
-func parseAmountToMicros(amount any) int64 {
+func parseAnthropicCentsToMicros(amount any) int64 {
 	switch v := amount.(type) {
 	case string:
 		f, err := strconv.ParseFloat(v, 64)
 		if err != nil {
 			return 0
 		}
-		return int64(math.Round(f * 1_000_000))
+		return int64(math.Round(f * 10_000))
 	case float64:
-		return int64(math.Round(v * 1_000_000))
+		return int64(math.Round(v * 10_000))
 	case int64:
-		return v * 1_000_000
+		return v * 10_000
 	case json.Number:
 		f, _ := v.Float64()
-		return int64(math.Round(f * 1_000_000))
+		return int64(math.Round(f * 10_000))
 	default:
 		return 0
 	}
@@ -207,10 +216,10 @@ func convertAnthropicBucket(bucket AnthropicCostBucket) []store.UsageRecord {
 	var records []store.UsageRecord
 
 	for _, res := range bucket.Results {
-		cost := parseAmountToMicros(res.Amount)
+		cost := parseAnthropicCentsToMicros(res.Amount)
 		model := res.Model
 		if model == "" {
-			model = "claude-3-5-sonnet-20241022"
+			model = OrgTotalModel
 		}
 
 		reqID := fmt.Sprintf("org-anthropic-%s-%s", dateStr, model)
@@ -297,38 +306,43 @@ func (imp *Importer) fetchAnthropicUsage(ctx context.Context) ([]store.UsageReco
 	return records, nil
 }
 
-func convertOpenAIItem(item OpenAICostItem) store.UsageRecord {
+func convertOpenAIBucket(bucket OpenAICostBucket) []store.UsageRecord {
 	t := time.Now().UTC()
-	if item.Timestamp > 0 {
-		t = time.Unix(item.Timestamp, 0).UTC()
+	if bucket.StartTime > 0 {
+		t = time.Unix(bucket.StartTime, 0).UTC()
 	}
 	dateStr := t.Format("2006-01-02")
-	cost := int64(math.Round(item.Amount.Value * 1_000_000))
-	lineItem := item.LineItem
-	if lineItem == "" {
-		lineItem = "default"
-	}
+	var records []store.UsageRecord
 
-	reqID := fmt.Sprintf("org-openai-%s-%s", dateStr, lineItem)
-	if item.ProjectID != "" {
-		reqID = fmt.Sprintf("org-openai-%s-%s-%s", dateStr, lineItem, item.ProjectID)
-	}
+	for _, res := range bucket.Results {
+		cost := int64(math.Round(res.Amount.Value * 1_000_000))
+		lineItem := "default"
+		if res.LineItem != nil && *res.LineItem != "" {
+			lineItem = *res.LineItem
+		}
 
-	return store.UsageRecord{
-		RequestID:      reqID,
-		ModelRequested: lineItem,
-		ModelUsed:      lineItem,
-		Provider:       "openai",
-		Source:         string(core.SourceOpenAIOrg),
-		CostKind:       string(core.CostKindCobrado),
-		CostMicros:     cost,
-		Status:         "success",
-		CreatedAt:      t,
+		reqID := fmt.Sprintf("org-openai-%s-%s", dateStr, lineItem)
+		if res.ProjectID != nil && *res.ProjectID != "" {
+			reqID = fmt.Sprintf("org-openai-%s-%s-%s", dateStr, lineItem, *res.ProjectID)
+		}
+
+		records = append(records, store.UsageRecord{
+			RequestID:      reqID,
+			ModelRequested: lineItem,
+			ModelUsed:      lineItem,
+			Provider:       "openai",
+			Source:         string(core.SourceOpenAIOrg),
+			CostKind:       string(core.CostKindCobrado),
+			CostMicros:     cost,
+			Status:         "success",
+			CreatedAt:      t,
+		})
 	}
+	return records
 }
 
 func (imp *Importer) fetchOpenAIPage(ctx context.Context, baseURL string, startTime, endTime int64, page string) (*OpenAICostsResponse, error) {
-	endpoint := fmt.Sprintf("%s/v1/organization/costs?start_time=%d&end_time=%d&limit=100",
+	endpoint := fmt.Sprintf("%s/v1/organization/costs?start_time=%d&end_time=%d&bucket_width=1d&limit=100&group_by=line_item&group_by=project_id",
 		baseURL, startTime, endTime)
 	if page != "" {
 		endpoint += "&page=" + url.QueryEscape(page)
@@ -377,8 +391,8 @@ func (imp *Importer) fetchOpenAIUsage(ctx context.Context) ([]store.UsageRecord,
 			return nil, err
 		}
 
-		for _, item := range payload.Data {
-			records = append(records, convertOpenAIItem(item))
+		for _, bucket := range payload.Data {
+			records = append(records, convertOpenAIBucket(bucket)...)
 		}
 
 		if !payload.HasMore || payload.NextPage == nil || *payload.NextPage == "" {

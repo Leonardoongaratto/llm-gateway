@@ -218,7 +218,7 @@ func (s *Store) processOrgSnapshotTx(ctx context.Context, tx *sql.Tx, dateStr st
 	}
 
 	diff := req.CostMicros - existingCost
-	if diff <= 0 {
+	if diff == 0 {
 		return false, nil
 	}
 

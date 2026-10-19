@@ -76,6 +76,15 @@ func resolveProjectsDir(dir string) string {
 	return ""
 }
 
+func (imp *Importer) IsEnabled() bool {
+	dir := resolveProjectsDir(imp.dir)
+	if dir == "" {
+		return false
+	}
+	info, err := os.Stat(dir)
+	return err == nil && info.IsDir()
+}
+
 func finalizeImportRun(run *store.ImportRun, errorMsgs []string, walkErr error) {
 	finishTime := time.Now().UTC()
 	run.FinishedAt = &finishTime

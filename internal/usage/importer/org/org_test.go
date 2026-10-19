@@ -2,12 +2,12 @@ package org_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,24 +76,24 @@ func TestOrgImporter_AnthropicSuccess(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		resp := org.AnthropicCostReportResponse{
-			Data: []org.AnthropicCostBucket{
+		fmt.Fprint(w, `{
+			"data": [
 				{
-					StartingAt: "2026-10-18T00:00:00Z",
-					EndingAt:   "2026-10-18T23:59:59Z",
-					Results: []org.AnthropicCostResult{
+					"starting_at": "2026-10-18T00:00:00Z",
+					"ending_at": "2026-10-18T23:59:59Z",
+					"results": [
 						{
-							Amount:      "30.00",
-							Currency:    "USD",
-							Model:       "claude-3-5-sonnet-20241022",
-							WorkspaceID: "ws-test-1",
-						},
-					},
-				},
-			},
-			HasMore: false,
-		}
-		_ = json.NewEncoder(w).Encode(resp)
+							"amount": "123.45",
+							"currency": "USD",
+							"model": "claude-3-5-sonnet-20241022",
+							"workspace_id": "ws-test-1"
+						}
+					]
+				}
+			],
+			"has_more": false,
+			"next_page": null
+		}`)
 	}))
 	defer server.Close()
 
@@ -119,11 +119,57 @@ func TestOrgImporter_AnthropicSuccess(t *testing.T) {
 	if rec.CostKind != string(core.CostKindCobrado) || rec.Provider != "anthropic" {
 		t.Errorf("unexpected record properties: %+v", rec)
 	}
-	if rec.CostMicros != 30_000_000 {
-		t.Errorf("expected 30_000_000 micros, got %d", rec.CostMicros)
+	if rec.CostMicros != 1_234_500 {
+		t.Errorf("expected 1_234_500 micros for amount '123.45', got %d", rec.CostMicros)
 	}
 	if rec.RequestID != "org-anthropic-2026-10-18-claude-3-5-sonnet-20241022-ws-test-1" {
 		t.Errorf("unexpected request ID: %s", rec.RequestID)
+	}
+}
+
+func TestOrgImporter_AnthropicNullModelDefaultsToOrgTotal(t *testing.T) {
+	ctx := context.Background()
+	st := setupTestStore(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"data": [
+				{
+					"starting_at": "2026-10-18T00:00:00Z",
+					"results": [
+						{
+							"amount": "50.00",
+							"currency": "USD",
+							"model": null
+						}
+					]
+				}
+			],
+			"has_more": false
+		}`)
+	}))
+	defer server.Close()
+
+	imp := org.New(st, org.Config{
+		AnthropicAdminKey: "ant-secret-key",
+		AnthropicBaseURL:  server.URL,
+	}, nil)
+
+	run, err := imp.Import(ctx, "anthropic-org")
+	if err != nil || run.RecordsImported != 1 {
+		t.Fatalf("expected 1 record imported: %v", err)
+	}
+
+	records, _, err := st.QueryUsage(ctx, store.UsageFilter{Source: string(core.SourceAnthropicOrg)})
+	if err != nil || len(records) != 1 {
+		t.Fatalf("expected 1 record: %v", err)
+	}
+	if records[0].ModelRequested != "org-total" || records[0].ModelUsed != "org-total" {
+		t.Errorf("expected model 'org-total', got '%s'", records[0].ModelRequested)
+	}
+	if records[0].CostMicros != 500_000 {
+		t.Errorf("expected 500_000 micros for 50.00 cents, got %d", records[0].CostMicros)
 	}
 }
 
@@ -138,23 +184,34 @@ func TestOrgImporter_OpenAISuccess(t *testing.T) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		resp := org.OpenAICostsResponse{
-			Object: "page",
-			Data: []org.OpenAICostItem{
-				{
-					Amount: org.OpenAICostAmount{
-						Value:    25.50,
-						Currency: "USD",
-					},
-					LineItem:  "gpt-4o",
-					ProjectID: "proj-test-1",
-					Timestamp: ts,
-				},
-			},
-			HasMore: false,
+		if !strings.Contains(r.URL.RawQuery, "group_by=line_item") || !strings.Contains(r.URL.RawQuery, "group_by=project_id") {
+			http.Error(w, "missing group_by query params", http.StatusBadRequest)
+			return
 		}
-		_ = json.NewEncoder(w).Encode(resp)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{
+			"object": "page",
+			"data": [
+				{
+					"object": "bucket",
+					"start_time": %d,
+					"end_time": %d,
+					"results": [
+						{
+							"object": "organization.costs.result",
+							"amount": {
+								"value": 25.50,
+								"currency": "usd"
+							},
+							"line_item": "gpt-4o",
+							"project_id": "proj-test-1"
+						}
+					]
+				}
+			],
+			"has_more": false,
+			"next_page": null
+		}`, ts, ts+86400)
 	}))
 	defer server.Close()
 
@@ -192,39 +249,33 @@ func TestOrgImporter_Pagination(t *testing.T) {
 	ctx := context.Background()
 	st := setupTestStore(t)
 
-	page2 := "page-2"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		page := r.URL.Query().Get("page")
 		w.Header().Set("Content-Type", "application/json")
 		if page == "" {
-			resp := org.AnthropicCostReportResponse{
-				Data: []org.AnthropicCostBucket{
+			fmt.Fprint(w, `{
+				"data": [
 					{
-						StartingAt: "2026-10-17T00:00:00Z",
-						Results: []org.AnthropicCostResult{
-							{Amount: 10.00, Model: "claude-3-5-haiku"},
-						},
-					},
-				},
-				HasMore:  true,
-				NextPage: &page2,
-			}
-			_ = json.NewEncoder(w).Encode(resp)
+						"starting_at": "2026-10-17T00:00:00Z",
+						"results": [{"amount": "10.00", "model": "claude-3-5-haiku"}]
+					}
+				],
+				"has_more": true,
+				"next_page": "page-2"
+			}`)
 			return
 		}
 
-		resp := org.AnthropicCostReportResponse{
-			Data: []org.AnthropicCostBucket{
+		fmt.Fprint(w, `{
+			"data": [
 				{
-					StartingAt: "2026-10-18T00:00:00Z",
-					Results: []org.AnthropicCostResult{
-						{Amount: 20.00, Model: "claude-3-5-sonnet"},
-					},
-				},
-			},
-			HasMore: false,
-		}
-		_ = json.NewEncoder(w).Encode(resp)
+					"starting_at": "2026-10-18T00:00:00Z",
+					"results": [{"amount": "20.00", "model": "claude-3-5-sonnet"}]
+				}
+			],
+			"has_more": false,
+			"next_page": null
+		}`)
 	}))
 	defer server.Close()
 
@@ -239,28 +290,54 @@ func TestOrgImporter_Pagination(t *testing.T) {
 	}
 }
 
-func TestOrgImporter_SnapshotCostIncrease(t *testing.T) {
+func assertOrgImportAndDailyCost(t *testing.T, imp *org.Importer, st *store.Store, expectedMicros int64) {
+	t.Helper()
 	ctx := context.Background()
+	run, err := imp.Import(ctx, "anthropic-org")
+	if err != nil {
+		t.Fatalf("import failed: %v", err)
+	}
+	if run.RecordsImported != 1 {
+		t.Fatalf("expected 1 record imported, got %d", run.RecordsImported)
+	}
+
+	records, _, err := st.QueryUsage(ctx, store.UsageFilter{Source: string(core.SourceAnthropicOrg)})
+	if err != nil {
+		t.Fatalf("query usage failed: %v", err)
+	}
+	if len(records) != 1 || records[0].CostMicros != expectedMicros {
+		t.Fatalf("expected record cost %d, got %v", expectedMicros, records)
+	}
+
+	aggs, err := st.QueryDailyAggregates(ctx, "2026-10-18", "2026-10-18")
+	if err != nil {
+		t.Fatalf("query daily aggregates failed: %v", err)
+	}
+	if len(aggs) != 1 || aggs[0].CostMicros != expectedMicros {
+		t.Fatalf("expected aggregate cost %d, got %v", expectedMicros, aggs)
+	}
+}
+
+func TestOrgImporter_SnapshotCostIncreaseAndAdjustment(t *testing.T) {
 	st := setupTestStore(t)
 
-	currentAmount := "10.00"
+	currentAmount := "1000.00"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		resp := org.AnthropicCostReportResponse{
-			Data: []org.AnthropicCostBucket{
+		fmt.Fprintf(w, `{
+			"data": [
 				{
-					StartingAt: "2026-10-18T00:00:00Z",
-					Results: []org.AnthropicCostResult{
+					"starting_at": "2026-10-18T00:00:00Z",
+					"results": [
 						{
-							Amount: currentAmount,
-							Model:  "claude-3-5-sonnet",
-						},
-					},
-				},
-			},
-			HasMore: false,
-		}
-		_ = json.NewEncoder(w).Encode(resp)
+							"amount": "%s",
+							"model": "claude-3-5-sonnet-20241022"
+						}
+					]
+				}
+			],
+			"has_more": false
+		}`, currentAmount)
 	}))
 	defer server.Close()
 
@@ -269,44 +346,13 @@ func TestOrgImporter_SnapshotCostIncrease(t *testing.T) {
 		AnthropicBaseURL:  server.URL,
 	}, nil)
 
-	// First run: $10.00
-	run1, err := imp.Import(ctx, "anthropic-org")
-	if err != nil || run1.RecordsImported != 1 {
-		t.Fatalf("first import failed: %v", err)
-	}
+	assertOrgImportAndDailyCost(t, imp, st, 10_000_000)
 
-	aggs1, err := st.QueryDailyAggregates(ctx, "2026-10-18", "2026-10-18")
-	if err != nil || len(aggs1) != 1 {
-		t.Fatalf("expected 1 daily aggregate: %v", err)
-	}
-	if aggs1[0].CostMicros != 10_000_000 {
-		t.Errorf("expected 10M micros in daily aggregate, got %d", aggs1[0].CostMicros)
-	}
+	currentAmount = "2500.00"
+	assertOrgImportAndDailyCost(t, imp, st, 25_000_000)
 
-	// Second run: $25.00 snapshot (increased throughout the day)
-	currentAmount = "25.00"
-	run2, err := imp.Import(ctx, "anthropic-org")
-	if err != nil || run2.RecordsImported != 1 {
-		t.Fatalf("second import failed: %v", err)
-	}
-
-	// Verify usage record has updated cost
-	records, _, err := st.QueryUsage(ctx, store.UsageFilter{Source: string(core.SourceAnthropicOrg)})
-	if err != nil || len(records) != 1 {
-		t.Fatalf("expected 1 record: %v", err)
-	}
-	if records[0].CostMicros != 25_000_000 {
-		t.Errorf("expected updated record to have 25M micros, got %d", records[0].CostMicros)
-	}
-
-	// Verify daily_aggregates updated by delta +15M to 25M total
-	aggs2, err := st.QueryDailyAggregates(ctx, "2026-10-18", "2026-10-18")
-	if err != nil || len(aggs2) != 1 {
-		t.Fatalf("expected 1 daily aggregate: %v", err)
-	}
-	if aggs2[0].CostMicros != 25_000_000 {
-		t.Errorf("expected 25M micros in daily aggregate after delta update, got %d", aggs2[0].CostMicros)
-	}
+	currentAmount = "2200.00"
+	assertOrgImportAndDailyCost(t, imp, st, 22_000_000)
 }
 
 func TestOrgImporter_ServerError(t *testing.T) {

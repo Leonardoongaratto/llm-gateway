@@ -279,6 +279,45 @@ func TestUsage_Readyz503WithFailingCheck(t *testing.T) {
 	}
 }
 
+func TestUsage_Readyz503WhenDBClosed(t *testing.T) {
+	port := getFreePort(t)
+	cfg := Config{
+		ServiceName:    "usage",
+		HTTPPort:       port,
+		LogLevel:       "debug",
+		DatabaseDriver: "sqlite",
+		DatabaseDSN:    ":memory:",
+		AdminToken:     "test-token",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+
+	stCh := make(chan *store.Store, 1)
+	go func() {
+		errCh <- run(ctx, cfg, WithLogWriter(io.Discard), WithStoreSeeder(func(st *store.Store) error {
+			stCh <- st
+			return nil
+		}))
+	}()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d", port)
+	waitForEndpoints(t, url)
+
+	select {
+	case st := <-stCh:
+		_ = st.DB().Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for store reference from seeder")
+	}
+	waitForStatus(t, url+"/readyz", http.StatusServiceUnavailable)
+
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+}
+
 func TestUsage_WithStoreSeeder(t *testing.T) {
 	port := getFreePort(t)
 	cfg := Config{

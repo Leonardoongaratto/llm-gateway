@@ -306,3 +306,21 @@ func TestReportEngine_SummaryACs(t *testing.T) {
 		verifyBUG02Invariance(ctx, t, engine, asOf)
 	})
 }
+
+func TestSubscriptionCycleStart_EdgeCases(t *testing.T) {
+	// renewalDay 31 on Nov 30 (November has 30 days): renewal occurs on Nov 30
+	asOfNov30 := time.Date(2026, 11, 30, 12, 0, 0, 0, time.UTC)
+	startNov30 := report.SubscriptionCycleStart(asOfNov30, 31)
+	expectedNov30 := time.Date(2026, 11, 30, 0, 0, 0, 0, time.UTC)
+	if !startNov30.Equal(expectedNov30) {
+		t.Errorf("expected cycle start Nov 30, got %v", startNov30)
+	}
+
+	// renewalDay 31 on Nov 29: renewal has not occurred yet this month, so cycle started Oct 31
+	asOfNov29 := time.Date(2026, 11, 29, 12, 0, 0, 0, time.UTC)
+	startNov29 := report.SubscriptionCycleStart(asOfNov29, 31)
+	expectedNov29 := time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC)
+	if !startNov29.Equal(expectedNov29) {
+		t.Errorf("expected cycle start Oct 31, got %v", startNov29)
+	}
+}
