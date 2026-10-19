@@ -77,8 +77,6 @@ func NewPublisher(js jetstream.JetStream, opts ...Option) *Publisher {
 
 func (p *Publisher) worker() {
 	defer p.wg.Done()
-	jsonOpts := protojson.MarshalOptions{UseProtoNames: true}
-	_ = jsonOpts
 
 	for task := range p.queue {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

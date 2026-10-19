@@ -25,9 +25,13 @@ func IsEligible(temperature float64, stream bool) bool {
 // ComputeKey computes a deterministic SHA-256 cache key from the keyID, model, and request contents.
 func ComputeKey(keyID string, req *llm.Request) string {
 	h := sha256.New()
-	_, _ = fmt.Fprintf(h, "key:%s|model:%s|max_tokens:%d|", keyID, req.Model, req.MaxTokens)
+	temp := 0.0
+	if req.Temperature != nil {
+		temp = *req.Temperature
+	}
+	_, _ = fmt.Fprintf(h, "k:%d:%s|m:%d:%s|t:%.4f|tok:%d|", len(keyID), keyID, len(req.Model), req.Model, temp, req.MaxTokens)
 	for _, m := range req.Messages {
-		_, _ = fmt.Fprintf(h, "r:%s:c:%s|", m.Role, m.Content)
+		_, _ = fmt.Fprintf(h, "r:%d:%s|c:%d:%s|", len(m.Role), m.Role, len(m.Content), m.Content)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -101,7 +105,6 @@ func (c *Cache) Get(key string) (*llm.Response, bool) {
 
 	c.evictList.MoveToFront(elem)
 
-	// Return a copy marked as cached
 	respCopy := *ent.response
 	respCopy.Cached = true
 	return &respCopy, true
@@ -123,7 +126,6 @@ func (c *Cache) Set(key string, resp *llm.Response, customTTL ...time.Duration) 
 
 	now := time.Now()
 
-	// Existing item update
 	if elem, ok := c.items[key]; ok {
 		c.evictList.MoveToFront(elem)
 		if ent, ok := elem.Value.(*entry); ok {
@@ -133,7 +135,6 @@ func (c *Cache) Set(key string, resp *llm.Response, customTTL ...time.Duration) 
 		return
 	}
 
-	// Evict oldest if full
 	if c.evictList.Len() >= c.capacity {
 		oldest := c.evictList.Back()
 		if oldest != nil {

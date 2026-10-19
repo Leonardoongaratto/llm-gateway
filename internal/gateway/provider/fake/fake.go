@@ -212,6 +212,16 @@ func (p *Provider) DoStream(ctx context.Context, req *llm.Request) (<-chan llm.C
 	go func() {
 		defer close(ch)
 		for _, c := range chunks {
+			p.mu.Lock()
+			d := p.delay
+			p.mu.Unlock()
+			if d > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(d):
+				}
+			}
 			select {
 			case <-ctx.Done():
 				return

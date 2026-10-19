@@ -11,11 +11,16 @@ import (
 	"syscall"
 	"time"
 
+	"encoding/json"
+	"net/http"
+
 	budgetv1 "github.com/Leonardoongaratto/llm-gateway/gen/lgw/budget/v1"
+	"github.com/Leonardoongaratto/llm-gateway/internal/budget/core"
 	"github.com/Leonardoongaratto/llm-gateway/internal/budget/grpcapi"
 	"github.com/Leonardoongaratto/llm-gateway/internal/budget/outbox"
 	"github.com/Leonardoongaratto/llm-gateway/internal/budget/store"
 	"github.com/Leonardoongaratto/llm-gateway/internal/budget/sweeper"
+	"github.com/Leonardoongaratto/llm-gateway/internal/kernel/money"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/config"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/health"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/logging"
@@ -175,6 +180,9 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 		RegisterGRPC: func(srv *grpc.Server) {
 			budgetv1.RegisterBudgetServiceServer(srv, grpcapi.New(budgetStore))
 		},
+		RegisterHTTP: func(mux *http.ServeMux) {
+			mux.HandleFunc("POST /admin/limits", handleAdminLimits(budgetStore))
+		},
 	}
 
 	return service.Run(ctx, srvCfg, srvOpts)
@@ -199,4 +207,33 @@ func realMain() int {
 
 func main() {
 	os.Exit(realMain())
+}
+
+func handleAdminLimits(budgetStore *store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			KeyID              string `json:"key_id"`
+			DailyLimitMicros   int64  `json:"daily_limit_micros"`
+			MonthlyLimitMicros int64  `json:"monthly_limit_micros"`
+			RPM                int32  `json:"rpm"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.KeyID == "" {
+			http.Error(w, "missing key_id", http.StatusBadRequest)
+			return
+		}
+		if err := budgetStore.SetKeyLimits(r.Context(), core.KeyLimits{
+			KeyID:              req.KeyID,
+			DailyLimitMicros:   money.Micros(req.DailyLimitMicros),
+			MonthlyLimitMicros: money.Micros(req.MonthlyLimitMicros),
+			RPM:                req.RPM,
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}
 }

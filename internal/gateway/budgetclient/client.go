@@ -186,7 +186,7 @@ func (c *Client) Reserve(ctx context.Context, keyID string, maxMicros int64, req
 
 // Settle updates a reservation to settled status with the actual measured cost.
 func (c *Client) Settle(ctx context.Context, reservationID string, actualMicros int64) error {
-	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	reqCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.timeout)
 	defer cancel()
 
 	_, err := c.grpcClient.Settle(reqCtx, &budgetv1.SettleRequest{
@@ -212,7 +212,7 @@ func (c *Client) SettleAsync(reservationID string, actualMicros int64) {
 
 // Release releases a reservation so reserved funds return to the available balance.
 func (c *Client) Release(ctx context.Context, reservationID string) error {
-	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	reqCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.timeout)
 	defer cancel()
 
 	_, err := c.grpcClient.Release(reqCtx, &budgetv1.ReleaseRequest{

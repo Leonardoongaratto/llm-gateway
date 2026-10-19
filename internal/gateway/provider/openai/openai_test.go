@@ -184,3 +184,17 @@ func TestOpenAIAdapter_DoStream_HttpError(t *testing.T) {
 		t.Errorf("503 error must be retryable")
 	}
 }
+
+func TestOpenAIAdapter_Do_NetworkError_IsRetryable(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
+	ts.Close() // immediately close to force network error
+
+	adapter := openai.New("key", openai.WithBaseURL(ts.URL))
+	_, err := adapter.Do(context.Background(), &llm.Request{Model: "gpt-4o"})
+	if err == nil {
+		t.Fatal("expected error on closed server, got nil")
+	}
+	if !provider.IsRetryable(err) {
+		t.Errorf("network connection error must be retryable UpstreamError")
+	}
+}

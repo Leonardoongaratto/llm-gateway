@@ -54,6 +54,7 @@ type Request struct {
 	Messages     []Message `json:"messages,omitempty"`
 	PromptTokens int64     `json:"prompt_tokens,omitempty"`
 	MaxTokens    int64     `json:"max_tokens,omitempty"`
+	Temperature  *float64  `json:"temperature,omitempty"`
 }
 
 type Response struct {
@@ -71,4 +72,5 @@ type Chunk struct {
 	Content      string `json:"content"`
 	FinishReason string `json:"finish_reason,omitempty"`
 	Usage        *Usage `json:"usage,omitempty"`
+	Err          error  `json:"error,omitempty"`
 }

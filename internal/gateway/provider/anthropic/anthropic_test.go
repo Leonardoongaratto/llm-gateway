@@ -172,3 +172,17 @@ func TestAnthropicAdapter_DoStream_HttpError(t *testing.T) {
 		t.Errorf("429 error must be retryable")
 	}
 }
+
+func TestAnthropicAdapter_Do_NetworkError_IsRetryable(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
+	ts.Close() // immediately close to force network error
+
+	adapter := anthropic.New("key", anthropic.WithBaseURL(ts.URL))
+	_, err := adapter.Do(context.Background(), &llm.Request{Model: "claude"})
+	if err == nil {
+		t.Fatal("expected error on closed server, got nil")
+	}
+	if !provider.IsRetryable(err) {
+		t.Errorf("network connection error must be retryable UpstreamError")
+	}
+}

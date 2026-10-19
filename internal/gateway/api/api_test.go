@@ -7,6 +7,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -432,5 +434,144 @@ func TestAPI_Models_List(t *testing.T) {
 	dataList, ok := parsed["data"].([]interface{})
 	if !ok || len(dataList) == 0 {
 		t.Errorf("expected models in data list, got %v", parsed["data"])
+	}
+}
+
+func TestAPI_AC1D15_Stream_ProviderFailureAfterFirstByte(t *testing.T) {
+	ts, _, fp := setupAPITestServer()
+	defer ts.Close()
+
+	fp.SetStreamChunks([]llm.Chunk{
+		{ID: "c1", Content: "Hello partial world"},
+		{ID: "c2", Err: errors.New("provider stream network reset")},
+	})
+
+	reqBody := `{"model":"fake-model","messages":[{"role":"user","content":"Stream failing test"}],"stream":true}`
+	httpReq, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/chat/completions", bytes.NewBufferString(reqBody))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+testRawKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("streaming request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK initial response, got %d", resp.StatusCode)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response: %v", err)
+	}
+	bodyStr := string(bodyBytes)
+
+	if !strings.Contains(bodyStr, "Hello partial world") {
+		t.Errorf("expected initial chunk in response, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "event: error") {
+		t.Errorf("expected event: error emitted on mid-stream failure, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "provider stream network reset") {
+		t.Errorf("expected error message in payload, got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "data: [DONE]") {
+		t.Errorf("expected NO [DONE] on mid-stream failure, got: %s", bodyStr)
+	}
+}
+
+func TestAPI_Messages_Streaming_SSE(t *testing.T) {
+	ts, _, fp := setupAPITestServer()
+	defer ts.Close()
+
+	fp.SetStreamChunks([]llm.Chunk{
+		{ID: "c1", Content: "Anthropic stream content"},
+		{ID: "c2", FinishReason: "stop", Usage: &llm.Usage{InputTokens: 10, OutputTokens: 5}},
+	})
+
+	reqBody := `{"model":"fake-model","messages":[{"role":"user","content":"Stream Anthropic"}],"stream":true}`
+	httpReq, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/messages", bytes.NewBufferString(reqBody))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	httpReq.Header.Set("x-api-key", testRawKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("streaming request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("expected text/event-stream Content-Type, got %s", ct)
+	}
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyStr := string(bodyBytes)
+
+	if !strings.Contains(bodyStr, "event: message_start") {
+		t.Errorf("expected message_start event, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "event: content_block_delta") {
+		t.Errorf("expected content_block_delta event, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "Anthropic stream content") {
+		t.Errorf("expected delta content, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "event: message_stop") {
+		t.Errorf("expected message_stop event, got: %s", bodyStr)
+	}
+}
+
+func TestAPI_Models_UnauthorizedWithGarbageKey(t *testing.T) {
+	ts, _, _ := setupAPITestServer()
+	defer ts.Close()
+
+	httpReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/v1/models", nil)
+	httpReq.Header.Set("Authorization", "Bearer garbage-virtual-key")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 Unauthorized for garbage key, got %d", resp.StatusCode)
+	}
+}
+
+func TestAPI_Models_FilteredByAllowedModels(t *testing.T) {
+	ts, _, _ := setupAPITestServer()
+	defer ts.Close()
+
+	httpReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/v1/models", nil)
+	httpReq.Header.Set("Authorization", "Bearer "+testRawKey)
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		t.Fatalf("failed to decode models list: %v", err)
+	}
+	dataList, ok := parsed["data"].([]interface{})
+	if !ok || len(dataList) == 0 {
+		t.Fatalf("expected models in data list, got %v", parsed["data"])
 	}
 }

@@ -40,7 +40,10 @@ func (m *mockBudgetClient) SettleAsync(reservationID string, actualMicros int64)
 	m.settleCalls = append(m.settleCalls, settleRecord{reservationID: reservationID, actualMicros: actualMicros})
 }
 
-func (m *mockBudgetClient) Release(_ context.Context, reservationID string) error {
+func (m *mockBudgetClient) Release(ctx context.Context, reservationID string) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	m.releaseCalls = append(m.releaseCalls, reservationID)
 	return nil
 }
@@ -314,10 +317,8 @@ func TestService_AC1D09_Streaming_Success(t *testing.T) {
 		t.Errorf("expected 'Hello world!', got %q", collected)
 	}
 
-	// Allow goroutine defer to settle
 	time.Sleep(50 * time.Millisecond)
 
-	// 500 in @ 3 USD + 200 out @ 15 USD = 1500 + 3000 = 4500 micros
 	if len(mockBudget.settleCalls) != 1 || mockBudget.settleCalls[0].actualMicros != 4500 {
 		t.Errorf("expected settle with 4500 micros, got %+v", mockBudget.settleCalls)
 	}
@@ -349,19 +350,43 @@ func TestService_AC1D14_Streaming_Disconnect(t *testing.T) {
 		t.Fatalf("unexpected streaming error: %v", err)
 	}
 
-	// Read 1 chunk then cancel
 	<-res.Stream
 	cancel()
 
-	// Drain remaining if any
 	for range res.Stream {
 	}
 
 	time.Sleep(50 * time.Millisecond)
 
-	// Reservation must be released on client cancel without final usage
 	if len(mockBudget.releaseCalls) != 1 {
 		t.Errorf("expected 1 budget release call on cancel, got %d", len(mockBudget.releaseCalls))
+	}
+}
+
+func TestService_AC1D14_ChatCompletion_ClientCancel_ReleaseNotAborted(t *testing.T) {
+	svc, mockBudget, fp, _, _ := setupServiceTestEnv()
+
+	fp.SetError(errors.New("provider temporary execution error"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	req := &llm.Request{
+		ID:        "req-unary-cancel",
+		Model:     "fake-model",
+		MaxTokens: 500,
+		Messages: []llm.Message{
+			{Role: "user", Content: "Test unary cancel"},
+		},
+	}
+
+	_, err := svc.ChatCompletion(ctx, testRawKey, req, 0.7)
+	if err == nil {
+		t.Fatal("expected error on canceled/failing request, got nil")
+	}
+
+	if len(mockBudget.releaseCalls) != 1 {
+		t.Errorf("expected 1 release call using uncancelled context, got %d", len(mockBudget.releaseCalls))
 	}
 }
 

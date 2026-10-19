@@ -143,7 +143,7 @@ func (s *Service) estimateAndReserve(ctx context.Context, snap *auth.Snapshot, k
 	}
 
 	if s.budgetClient == nil {
-		return pricing, maxCost, "", 0, nil
+		return nil, 0, "", 0, llm.ErrBudgetUnavailable
 	}
 
 	resID, rem, err := s.budgetClient.Reserve(ctx, keyID, int64(maxCost), req.ID)
@@ -199,7 +199,7 @@ func (s *Service) ChatCompletion(ctx context.Context, rawKey string, req *llm.Re
 	execResult, execErr := s.router.Execute(ctx, snap, req)
 	if execErr != nil {
 		if reservationID != "" && s.budgetClient != nil {
-			_ = s.budgetClient.Release(ctx, reservationID)
+			_ = s.budgetClient.Release(context.WithoutCancel(ctx), reservationID)
 		}
 		return nil, execErr
 	}
@@ -259,23 +259,53 @@ func (s *Service) finalizeStream(reqID, keyID, modelReq, reservationID string, i
 	}
 }
 
+func resolveUsage(usage *llm.Usage, estimatedTokens int64) *llm.Usage {
+	if usage != nil {
+		return usage
+	}
+	if estimatedTokens > 0 {
+		return &llm.Usage{OutputTokens: estimatedTokens}
+	}
+	return nil
+}
+
+func sendChunk(ctx context.Context, chunk llm.Chunk, out chan<- llm.Chunk) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case out <- chunk:
+		return true
+	}
+}
+
+func processChunk(chunk llm.Chunk, finalUsage *llm.Usage, estimatedTokens int64) (*llm.Usage, int64) {
+	if chunk.Usage != nil {
+		return chunk.Usage, estimatedTokens
+	}
+	if chunk.Content != "" {
+		return finalUsage, estimatedTokens + int64(len(chunk.Content)+3)/4
+	}
+	return finalUsage, estimatedTokens
+}
+
 func forwardStream(ctx context.Context, in <-chan llm.Chunk, out chan<- llm.Chunk) *llm.Usage {
 	var finalUsage *llm.Usage
+	var estimatedOutputTokens int64
+
 	for {
 		select {
 		case <-ctx.Done():
-			return finalUsage
+			return nil
 		case chunk, ok := <-in:
 			if !ok {
-				return finalUsage
+				if ctx.Err() != nil {
+					return nil
+				}
+				return resolveUsage(finalUsage, estimatedOutputTokens)
 			}
-			if chunk.Usage != nil {
-				finalUsage = chunk.Usage
-			}
-			select {
-			case <-ctx.Done():
-				return finalUsage
-			case out <- chunk:
+			finalUsage, estimatedOutputTokens = processChunk(chunk, finalUsage, estimatedOutputTokens)
+			if !sendChunk(ctx, chunk, out) || chunk.Err != nil {
+				return nil
 			}
 		}
 	}
@@ -305,7 +335,7 @@ func (s *Service) ChatCompletionStream(ctx context.Context, rawKey string, req *
 	streamExec, err := s.router.ExecuteStream(ctx, snap, req)
 	if err != nil {
 		if reservationID != "" && s.budgetClient != nil {
-			_ = s.budgetClient.Release(ctx, reservationID)
+			_ = s.budgetClient.Release(context.WithoutCancel(ctx), reservationID)
 		}
 		return nil, err
 	}

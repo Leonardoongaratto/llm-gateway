@@ -62,10 +62,11 @@ type breakerDecorator struct {
 	threshold int
 	cooldown  time.Duration
 
-	mu       sync.Mutex
-	state    circuitState
-	failures int
-	openedAt time.Time
+	mu              sync.Mutex
+	state           circuitState
+	failures        int
+	openedAt        time.Time
+	halfOpenRunning bool
 }
 
 // WithBreaker wraps a provider with a circuit breaker state machine.
@@ -94,9 +95,17 @@ func (b *breakerDecorator) canExecute() bool {
 	if b.state == stateOpen {
 		if now.Sub(b.openedAt) >= b.cooldown {
 			b.state = stateHalfOpen
+			b.halfOpenRunning = true
 			return true
 		}
 		return false
+	}
+	if b.state == stateHalfOpen {
+		if b.halfOpenRunning {
+			return false
+		}
+		b.halfOpenRunning = true
+		return true
 	}
 	return true
 }
@@ -105,14 +114,14 @@ func (b *breakerDecorator) recordResult(err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	b.halfOpenRunning = false
+
 	if err == nil {
 		b.failures = 0
 		b.state = stateClosed
 		return
 	}
 
-	// Only retryable upstream failures (5xx, timeouts, network) trip the breaker.
-	// Semantic / validation errors (400) do NOT count as upstream failure.
 	if provider.IsRetryable(err) {
 		b.failures++
 		if b.state == stateHalfOpen || b.failures >= b.threshold {
@@ -138,6 +147,22 @@ func (b *breakerDecorator) DoStream(ctx context.Context, req *llm.Request) (<-ch
 	}
 
 	ch, err := b.inner.DoStream(ctx, req)
-	b.recordResult(err)
-	return ch, err
+	if err != nil {
+		b.recordResult(err)
+		return nil, err
+	}
+
+	wrapped := make(chan llm.Chunk)
+	go func() {
+		defer close(wrapped)
+		var streamErr error
+		for c := range ch {
+			if c.Err != nil {
+				streamErr = c.Err
+			}
+			wrapped <- c
+		}
+		b.recordResult(streamErr)
+	}()
+	return wrapped, nil
 }

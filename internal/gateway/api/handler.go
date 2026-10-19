@@ -86,10 +86,16 @@ func mapErrorDetails(err error) (int, string, string, string, string) {
 
 	var upstreamErr *provider.UpstreamError
 	if errors.As(err, &upstreamErr) {
-		return upstreamErr.StatusCode, upstreamErr.Message, "invalid_request_error", "invalid_request", ""
+		errType := "invalid_request_error"
+		code := "invalid_request"
+		if upstreamErr.StatusCode >= 500 {
+			errType = "api_error"
+			code = "upstream_error"
+		}
+		return upstreamErr.StatusCode, upstreamErr.Message, errType, code, ""
 	}
 
-	return http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_request", ""
+	return http.StatusInternalServerError, "internal server error", "api_error", "internal_error", ""
 }
 
 func writeError(w http.ResponseWriter, err error) {
@@ -104,6 +110,22 @@ func writeError(w http.ResponseWriter, err error) {
 			Message: msg,
 			Type:    errType,
 			Code:    code,
+		},
+	})
+}
+
+func writeAnthropicError(w http.ResponseWriter, err error) {
+	statusCode, msg, errType, _, retryAfter := mapErrorDetails(err)
+	w.Header().Set("Content-Type", "application/json")
+	if retryAfter != "" {
+		w.Header().Set("Retry-After", retryAfter)
+	}
+	w.WriteHeader(statusCode)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"type": "error",
+		"error": map[string]any{
+			"type":    errType,
+			"message": msg,
 		},
 	})
 }
@@ -161,6 +183,8 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
+
 	var req openAIChatReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, fmt.Errorf("invalid json request: %w", err))
@@ -173,10 +197,11 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	llmReq := &llm.Request{
-		Model:     req.Model,
-		Messages:  req.Messages,
-		MaxTokens: req.MaxTokens,
-		Stream:    req.Stream,
+		Model:       req.Model,
+		Messages:    req.Messages,
+		MaxTokens:   req.MaxTokens,
+		Stream:      req.Stream,
+		Temperature: req.Temperature,
 	}
 
 	if req.Stream {
@@ -190,7 +215,7 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	setResponseHeaders(w, int64(res.CostMicros), res.Provider, res.CacheHit, res.RemainingBudgetMicros, res.Response.ID)
+	setResponseHeaders(w, int64(res.CostMicros), res.Provider, res.CacheHit, res.RemainingBudgetMicros, llmReq.ID)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(openAIChatResp{
 		ID:      res.Response.ID,
@@ -250,7 +275,12 @@ func (h *Handler) streamOpenAI(w http.ResponseWriter, r *http.Request, rawKey st
 	}
 
 	created := time.Now().Unix()
+	var streamErr error
 	for chunk := range streamRes.Stream {
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+			break
+		}
 		var finishReason *string
 		if chunk.FinishReason != "" {
 			fr := chunk.FinishReason
@@ -274,15 +304,29 @@ func (h *Handler) streamOpenAI(w http.ResponseWriter, r *http.Request, rawKey st
 		flusher.Flush()
 	}
 
+	if streamErr != nil {
+		errPayload, _ := json.Marshal(map[string]any{
+			"error": map[string]any{
+				"message": streamErr.Error(),
+				"type":    "api_error",
+				"code":    "stream_error",
+			},
+		})
+		_, _ = fmt.Fprintf(w, "event: error\ndata: %s\n\n", errPayload)
+		flusher.Flush()
+		return
+	}
+
 	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
 }
 
 type anthropicReq struct {
-	Model     string        `json:"model"`
-	Messages  []llm.Message `json:"messages"`
-	MaxTokens int64         `json:"max_tokens,omitempty"`
-	Stream    bool          `json:"stream,omitempty"`
+	Model       string        `json:"model"`
+	Messages    []llm.Message `json:"messages"`
+	MaxTokens   int64         `json:"max_tokens,omitempty"`
+	Stream      bool          `json:"stream,omitempty"`
+	Temperature *float64      `json:"temperature,omitempty"`
 }
 
 type anthropicTextContent struct {
@@ -313,30 +357,43 @@ func (h *Handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	rawKey := extractKey(r)
 	if rawKey == "" {
-		writeError(w, llm.ErrInvalidKey)
+		writeAnthropicError(w, llm.ErrInvalidKey)
 		return
 	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
 
 	var req anthropicReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, fmt.Errorf("invalid json request: %w", err))
+		writeAnthropicError(w, fmt.Errorf("invalid json request: %w", err))
 		return
+	}
+
+	temp := 0.7
+	if req.Temperature != nil {
+		temp = *req.Temperature
 	}
 
 	llmReq := &llm.Request{
-		Model:     req.Model,
-		Messages:  req.Messages,
-		MaxTokens: req.MaxTokens,
-		Stream:    req.Stream,
+		Model:       req.Model,
+		Messages:    req.Messages,
+		MaxTokens:   req.MaxTokens,
+		Stream:      req.Stream,
+		Temperature: req.Temperature,
 	}
 
-	res, err := h.svc.ChatCompletion(r.Context(), rawKey, llmReq, 0.7)
-	if err != nil {
-		writeError(w, err)
+	if req.Stream {
+		h.streamAnthropic(w, r, rawKey, llmReq)
 		return
 	}
 
-	setResponseHeaders(w, int64(res.CostMicros), res.Provider, res.CacheHit, res.RemainingBudgetMicros, res.Response.ID)
+	res, err := h.svc.ChatCompletion(r.Context(), rawKey, llmReq, temp)
+	if err != nil {
+		writeAnthropicError(w, err)
+		return
+	}
+
+	setResponseHeaders(w, int64(res.CostMicros), res.Provider, res.CacheHit, res.RemainingBudgetMicros, llmReq.ID)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(anthropicResp{
 		ID:         res.Response.ID,
@@ -354,6 +411,116 @@ func (h *Handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) streamAnthropic(w http.ResponseWriter, r *http.Request, rawKey string, req *llm.Request) {
+	streamRes, err := h.svc.ChatCompletionStream(r.Context(), rawKey, req)
+	if err != nil {
+		writeAnthropicError(w, err)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeAnthropicError(w, errors.New("streaming unsupported by client"))
+		return
+	}
+
+	setResponseHeaders(w, 0, streamRes.Provider, false, streamRes.RemainingBudgetMicros, req.ID)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	msgStartPayload, _ := json.Marshal(map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id":          req.ID,
+			"type":        "message",
+			"role":        "assistant",
+			"model":       streamRes.Model,
+			"content":     []any{},
+			"stop_reason": nil,
+			"usage": map[string]any{
+				"input_tokens":  0,
+				"output_tokens": 0,
+			},
+		},
+	})
+	_, _ = fmt.Fprintf(w, "event: message_start\ndata: %s\n\n", msgStartPayload)
+
+	blockStartPayload, _ := json.Marshal(map[string]any{
+		"type":  "content_block_start",
+		"index": 0,
+		"content_block": map[string]any{
+			"type": "text",
+			"text": "",
+		},
+	})
+	_, _ = fmt.Fprintf(w, "event: content_block_start\ndata: %s\n\n", blockStartPayload)
+	flusher.Flush()
+
+	var streamErr error
+	var finalOutputTokens int64
+	for chunk := range streamRes.Stream {
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+			break
+		}
+		if chunk.Usage != nil {
+			finalOutputTokens = chunk.Usage.OutputTokens
+		}
+		if chunk.Content != "" {
+			deltaPayload, _ := json.Marshal(map[string]any{
+				"type":  "content_block_delta",
+				"index": 0,
+				"delta": map[string]any{
+					"type": "text_delta",
+					"text": chunk.Content,
+				},
+			})
+			_, _ = fmt.Fprintf(w, "event: content_block_delta\ndata: %s\n\n", deltaPayload)
+			flusher.Flush()
+		}
+	}
+
+	if streamErr != nil {
+		errPayload, _ := json.Marshal(map[string]any{
+			"type": "error",
+			"error": map[string]any{
+				"type":    "api_error",
+				"message": streamErr.Error(),
+			},
+		})
+		_, _ = fmt.Fprintf(w, "event: error\ndata: %s\n\n", errPayload)
+		flusher.Flush()
+		return
+	}
+
+	blockStopPayload, _ := json.Marshal(map[string]any{
+		"type":  "content_block_stop",
+		"index": 0,
+	})
+	_, _ = fmt.Fprintf(w, "event: content_block_stop\ndata: %s\n\n", blockStopPayload)
+
+	msgDeltaPayload, _ := json.Marshal(map[string]any{
+		"type": "message_delta",
+		"delta": map[string]any{
+			"stop_reason":   "end_turn",
+			"stop_sequence": nil,
+		},
+		"usage": map[string]any{
+			"output_tokens": finalOutputTokens,
+		},
+	})
+	_, _ = fmt.Fprintf(w, "event: message_delta\ndata: %s\n\n", msgDeltaPayload)
+
+	msgStopPayload, _ := json.Marshal(map[string]any{
+		"type": "message_stop",
+	})
+	_, _ = fmt.Fprintf(w, "event: message_stop\ndata: %s\n\n", msgStopPayload)
+	flusher.Flush()
+}
+
 type modelEntry struct {
 	ID      string `json:"id"`
 	Object  string `json:"object"`
@@ -366,28 +533,19 @@ type modelListResponse struct {
 	Data   []modelEntry `json:"data"`
 }
 
-func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-		return
+func collectAllowedModels(snap *auth.Snapshot, keyInfo *auth.KeyInfo) []modelEntry {
+	if snap == nil {
+		return []modelEntry{}
 	}
 
-	rawKey := extractKey(r)
-	if rawKey == "" {
-		writeError(w, llm.ErrInvalidKey)
-		return
-	}
-
-	snap := h.authMgr.GetSnapshot()
 	modelSet := make(map[string]bool)
-
-	if snap != nil {
-		for _, p := range snap.Pricing {
-			if p != nil && p.Model != "" {
-				modelSet[p.Model] = true
-			}
+	for _, p := range snap.Pricing {
+		if p != nil && p.Model != "" && keyInfo.IsModelAllowed(p.Model) {
+			modelSet[p.Model] = true
 		}
-		for m := range snap.LogicalModels {
+	}
+	for m := range snap.LogicalModels {
+		if keyInfo.IsModelAllowed(m) {
 			modelSet[m] = true
 		}
 	}
@@ -404,6 +562,28 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(models, func(i, j int) bool {
 		return models[i].ID < models[j].ID
 	})
+	return models
+}
+
+func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	rawKey := extractKey(r)
+	if rawKey == "" {
+		writeError(w, llm.ErrInvalidKey)
+		return
+	}
+
+	keyInfo, err := h.authMgr.Authenticate(rawKey)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	models := collectAllowedModels(h.authMgr.GetSnapshot(), keyInfo)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(modelListResponse{

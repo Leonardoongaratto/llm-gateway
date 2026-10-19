@@ -78,6 +78,7 @@ func waitForStatus(t *testing.T, url string, expectedCode int) {
 }
 
 func TestGateway_DefaultConfigContract(t *testing.T) {
+	t.Setenv("LGW_NONEXISTENT_KEY_PEPPER", "test-pepper-1234567890")
 	cfg, err := config.LoadFromEnv[Config]("LGW_NONEXISTENT_")
 	if err != nil {
 		t.Fatalf("failed to load default config: %v", err)
@@ -87,7 +88,16 @@ func TestGateway_DefaultConfigContract(t *testing.T) {
 	}
 }
 
+func TestGateway_RealMain_MissingRequiredPepperReturnsOne(t *testing.T) {
+	t.Setenv("LGW_KEY_PEPPER", "")
+	code := realMain()
+	if code != 1 {
+		t.Errorf("expected exit code 1 for missing key pepper, got %d", code)
+	}
+}
+
 func TestGateway_RealMain_InvalidEnvReturnsOne(t *testing.T) {
+	t.Setenv("LGW_KEY_PEPPER", "test-pepper-1234567890")
 	t.Setenv("LGW_HTTP_PORT", "not-an-int")
 	code := realMain()
 	if code != 1 {
@@ -101,14 +111,26 @@ func TestGateway_RunAndEndpoints_AC1A11(t *testing.T) {
 		ServiceName: "gateway",
 		HTTPPort:    port,
 		LogLevel:    "debug",
+		KeyPepper:   "test-pepper-1234567890",
 	}
+
+	authMgr, _ := auth.NewManager("test-pepper-1234567890", nil)
+	authMgr.UpdateSnapshot(&auth.Snapshot{
+		Version: 1,
+		Pricing: map[string]*auth.PricingInfo{
+			"model-test": {Model: "model-test"},
+		},
+	})
+	svc := core.NewService(core.ServiceConfig{
+		AuthManager: authMgr,
+	})
 
 	var logBuf bytes.Buffer
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 
 	go func() {
-		errCh <- run(ctx, cfg, WithLogWriter(&logBuf))
+		errCh <- run(ctx, cfg, WithLogWriter(&logBuf), WithCoreService(svc, authMgr))
 	}()
 
 	url := fmt.Sprintf("http://127.0.0.1:%d", port)
@@ -134,12 +156,41 @@ func TestGateway_RunAndEndpoints_AC1A11(t *testing.T) {
 	}
 }
 
+func TestGateway_Readyz503WithoutBudgetAndSnapshot(t *testing.T) {
+	port := getFreePort(t)
+	cfg := Config{
+		ServiceName: "gateway",
+		HTTPPort:    port,
+		LogLevel:    "debug",
+		KeyPepper:   "test-pepper-1234567890",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- run(ctx, cfg, WithLogWriter(io.Discard))
+	}()
+
+	urlLivez := fmt.Sprintf("http://127.0.0.1:%d/livez", port)
+	waitForStatus(t, urlLivez, http.StatusOK)
+
+	urlReadyz := fmt.Sprintf("http://127.0.0.1:%d/readyz", port)
+	waitForStatus(t, urlReadyz, http.StatusServiceUnavailable)
+
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+}
+
 func TestGateway_Readyz503WithFailingCheck(t *testing.T) {
 	port := getFreePort(t)
 	cfg := Config{
 		ServiceName: "gateway",
 		HTTPPort:    port,
 		LogLevel:    "debug",
+		KeyPepper:   "test-pepper-1234567890",
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -168,6 +219,7 @@ func TestGateway_WithCustomCoreService(t *testing.T) {
 		ServiceName: "gateway",
 		HTTPPort:    port,
 		LogLevel:    "debug",
+		KeyPepper:   "test-pepper-1234567890",
 	}
 
 	authMgr, _ := auth.NewManager("test-pepper", nil)

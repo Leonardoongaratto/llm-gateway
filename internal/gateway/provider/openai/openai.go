@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -91,6 +92,7 @@ type chatRequest struct {
 	MaxTokens     int64          `json:"max_tokens,omitempty"`
 	Stream        bool           `json:"stream"`
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+	Temperature   *float64       `json:"temperature,omitempty"`
 }
 
 type chatChoice struct {
@@ -147,10 +149,11 @@ func (a *Adapter) Do(ctx context.Context, req *llm.Request) (*llm.Response, erro
 	}
 
 	bodyBytes, err := json.Marshal(chatRequest{
-		Model:     req.Model,
-		Messages:  msgs,
-		MaxTokens: req.MaxTokens,
-		Stream:    false,
+		Model:       req.Model,
+		Messages:    msgs,
+		MaxTokens:   req.MaxTokens,
+		Stream:      false,
+		Temperature: req.Temperature,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
@@ -173,7 +176,18 @@ func (a *Adapter) Do(ctx context.Context, req *llm.Request) (*llm.Response, erro
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("http request failed: %w", err)
+		if errors.Is(err, context.Canceled) {
+			return nil, err
+		}
+		statusCode := http.StatusBadGateway
+		if errors.Is(err, context.DeadlineExceeded) {
+			statusCode = http.StatusGatewayTimeout
+		}
+		return nil, &provider.UpstreamError{
+			StatusCode: statusCode,
+			Message:    err.Error(),
+			Retryable:  true,
+		}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -297,6 +311,12 @@ func (a *Adapter) scanStream(ctx context.Context, body io.ReadCloser, out chan<-
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		select {
+		case <-ctx.Done():
+		case out <- llm.Chunk{Err: err}:
+		}
+	}
 }
 
 // DoStream executes a streaming request against the OpenAI Chat Completions API with SSE.
@@ -315,6 +335,7 @@ func (a *Adapter) DoStream(ctx context.Context, req *llm.Request) (<-chan llm.Ch
 		MaxTokens:     req.MaxTokens,
 		Stream:        true,
 		StreamOptions: &streamOptions{IncludeUsage: true},
+		Temperature:   req.Temperature,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
@@ -338,7 +359,18 @@ func (a *Adapter) DoStream(ctx context.Context, req *llm.Request) (<-chan llm.Ch
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("http request failed: %w", err)
+		if errors.Is(err, context.Canceled) {
+			return nil, err
+		}
+		statusCode := http.StatusBadGateway
+		if errors.Is(err, context.DeadlineExceeded) {
+			statusCode = http.StatusGatewayTimeout
+		}
+		return nil, &provider.UpstreamError{
+			StatusCode: statusCode,
+			Message:    err.Error(),
+			Retryable:  true,
+		}
 	}
 
 	if resp.StatusCode != http.StatusOK {

@@ -37,17 +37,20 @@ import (
 )
 
 type Config struct {
-	ServiceName     string `env:"SERVICE_NAME" default:"gateway"`
-	HTTPPort        int    `env:"HTTP_PORT" default:"8788"`
-	LogLevel        string `env:"LOG_LEVEL" default:"info"`
-	OTelEndpoint    string `env:"OTEL_ENDPOINT" default:""`
-	KeyPepper       string `env:"KEY_PEPPER" default:"default-gateway-pepper-0123456789"`
-	ControlAddr     string `env:"CONTROL_ADDR" default:""`
-	BudgetAddr      string `env:"BUDGET_ADDR" default:""`
-	NATSURL         string `env:"NATS_URL" default:""`
-	AnthropicAPIKey string `env:"ANTHROPIC_API_KEY" default:""`
-	OpenAIAPIKey    string `env:"OPENAI_API_KEY" default:""`
-	GeminiAPIKey    string `env:"GEMINI_API_KEY" default:""`
+	ServiceName      string `env:"SERVICE_NAME" default:"gateway"`
+	HTTPPort         int    `env:"HTTP_PORT" default:"8788"`
+	LogLevel         string `env:"LOG_LEVEL" default:"info"`
+	OTelEndpoint     string `env:"OTEL_ENDPOINT" default:""`
+	KeyPepper        string `env:"KEY_PEPPER,required"`
+	ControlAddr      string `env:"CONTROL_ADDR" default:""`
+	BudgetAddr       string `env:"BUDGET_ADDR" default:""`
+	NATSURL          string `env:"NATS_URL" default:""`
+	AnthropicAPIKey  string `env:"ANTHROPIC_API_KEY" default:""`
+	AnthropicBaseURL string `env:"ANTHROPIC_BASE_URL" default:""`
+	OpenAIAPIKey     string `env:"OPENAI_API_KEY" default:""`
+	OpenAIBaseURL    string `env:"OPENAI_BASE_URL" default:""`
+	GeminiAPIKey     string `env:"GEMINI_API_KEY" default:""`
+	GeminiBaseURL    string `env:"GEMINI_BASE_URL" default:""`
 }
 
 type namedCheck struct {
@@ -83,54 +86,80 @@ func WithCoreService(svc *core.Service, authMgr *auth.Manager) RunOption {
 	}
 }
 
-func setupAuthAndNATS(ctx context.Context, cfg Config, logger *slog.Logger) (*auth.Manager, *events.Publisher, func()) {
+func setupControl(ctx context.Context, controlAddr, keyPepper string, logger *slog.Logger) (*auth.Manager, func(), error) {
 	var controlClient controlv1.ControlServiceClient
-	var cleanups []func()
+	cleanup := func() {}
 
-	if cfg.ControlAddr != "" {
-		if conn, err := grpcx.Dial(ctx, cfg.ControlAddr); err == nil {
-			controlClient = controlv1.NewControlServiceClient(conn)
-			cleanups = append(cleanups, func() { _ = conn.Close() })
+	if controlAddr != "" {
+		conn, err := grpcx.Dial(ctx, controlAddr)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to dial control service at %s: %w", controlAddr, err)
 		}
+		controlClient = controlv1.NewControlServiceClient(conn)
+		cleanup = func() { _ = conn.Close() }
 	}
 
-	authMgr, _ := auth.NewManager(cfg.KeyPepper, controlClient, auth.WithLogger(logger))
+	authMgr, err := auth.NewManager(keyPepper, controlClient, auth.WithLogger(logger))
+	if err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("failed to create auth manager: %w", err)
+	}
 	if controlClient != nil {
-		_ = authMgr.LoadSnapshot(ctx)
-	}
-
-	var publisher *events.Publisher
-	if cfg.NATSURL != "" {
-		if nc, js, err := natsx.Connect(cfg.NATSURL); err == nil {
-			_, _ = authMgr.StartConfigWatcher(ctx, js)
-			publisher = events.NewPublisher(js, events.WithLogger(logger))
-			cleanups = append(cleanups, func() {
-				_ = publisher.Close()
-				nc.Close()
-			})
+		if err := authMgr.LoadSnapshot(ctx); err != nil {
+			logger.Warn("initial snapshot load failed, will retry on event", slog.Any("error", err))
 		}
 	}
-
-	return authMgr, publisher, func() {
-		for _, c := range cleanups {
-			c()
-		}
-	}
+	return authMgr, cleanup, nil
 }
 
-func setupBudget(ctx context.Context, cfg Config, logger *slog.Logger) (*budgetclient.Client, func()) {
+func setupNATS(ctx context.Context, natsURL string, authMgr *auth.Manager, logger *slog.Logger) (core.EventPublisher, func(), error) {
+	if natsURL == "" {
+		return nil, func() {}, nil
+	}
+	nc, js, err := natsx.Connect(natsURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to connect to nats at %s: %w", natsURL, err)
+	}
+	_, _ = authMgr.StartConfigWatcher(ctx, js)
+	publisher := events.NewPublisher(js, events.WithLogger(logger))
+	cleanup := func() {
+		_ = publisher.Close()
+		nc.Close()
+	}
+	return publisher, cleanup, nil
+}
+
+func setupAuthAndNATS(ctx context.Context, cfg Config, logger *slog.Logger) (*auth.Manager, core.EventPublisher, func(), error) {
+	authMgr, cleanupCtrl, err := setupControl(ctx, cfg.ControlAddr, cfg.KeyPepper, logger)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	pub, cleanupNATS, err := setupNATS(ctx, cfg.NATSURL, authMgr, logger)
+	if err != nil {
+		cleanupCtrl()
+		return nil, nil, nil, err
+	}
+
+	return authMgr, pub, func() {
+		cleanupNATS()
+		cleanupCtrl()
+	}, nil
+}
+
+func setupBudget(ctx context.Context, cfg Config, logger *slog.Logger) (core.BudgetClient, func(), error) {
 	if cfg.BudgetAddr == "" {
-		return nil, func() {}
+		return nil, func() {}, nil
 	}
 	conn, err := grpcx.Dial(ctx, cfg.BudgetAddr)
 	if err != nil {
-		return nil, func() {}
+		return nil, nil, fmt.Errorf("failed to dial budget service at %s: %w", cfg.BudgetAddr, err)
 	}
 	bc := budgetclient.New(budgetv1.NewBudgetServiceClient(conn), budgetclient.WithLogger(logger))
 	return bc, func() {
 		_ = bc.Close()
 		_ = conn.Close()
-	}
+	}, nil
 }
 
 func decorateProvider(p provider.Provider) provider.Provider {
@@ -139,11 +168,24 @@ func decorateProvider(p provider.Provider) provider.Provider {
 	return decorate.WithMetrics(withBreaker, nil)
 }
 
-func setupRouter(cfg Config, pub *events.Publisher) *router.Router {
+func setupRouter(cfg Config, pub core.EventPublisher) *router.Router {
 	r := router.New()
-	anth := decorateProvider(anthropic.New(cfg.AnthropicAPIKey))
-	oai := decorateProvider(openai.New(cfg.OpenAIAPIKey))
-	gem := decorateProvider(gemini.New(cfg.GeminiAPIKey))
+	var anthOpts []anthropic.Option
+	if cfg.AnthropicBaseURL != "" {
+		anthOpts = append(anthOpts, anthropic.WithBaseURL(cfg.AnthropicBaseURL))
+	}
+	var oaiOpts []openai.Option
+	if cfg.OpenAIBaseURL != "" {
+		oaiOpts = append(oaiOpts, openai.WithBaseURL(cfg.OpenAIBaseURL))
+	}
+	var gemOpts []gemini.Option
+	if cfg.GeminiBaseURL != "" {
+		gemOpts = append(gemOpts, gemini.WithBaseURL(cfg.GeminiBaseURL))
+	}
+
+	anth := decorateProvider(anthropic.New(cfg.AnthropicAPIKey, anthOpts...))
+	oai := decorateProvider(openai.New(cfg.OpenAIAPIKey, oaiOpts...))
+	gem := decorateProvider(gemini.New(cfg.GeminiAPIKey, gemOpts...))
 
 	r.Register("anthropic", anth)
 	r.Register("openai", oai)
@@ -161,6 +203,19 @@ func setupRouter(cfg Config, pub *events.Publisher) *router.Router {
 		})
 	}
 	return r
+}
+
+func buildCoreService(cfg Config, authMgr *auth.Manager, budgetCli core.BudgetClient, pub core.EventPublisher, logger *slog.Logger) *core.Service {
+	r := setupRouter(cfg, pub)
+	localCache := cache.New(cache.WithCapacity(10000), cache.WithTTL(5*time.Minute))
+	return core.NewService(core.ServiceConfig{
+		AuthManager:    authMgr,
+		BudgetClient:   budgetCli,
+		EventPublisher: pub,
+		LocalCache:     localCache,
+		Router:         r,
+		Logger:         logger,
+	})
 }
 
 func run(ctx context.Context, cfg Config, opts ...RunOption) error {
@@ -186,28 +241,39 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 		checker.RegisterCheck(ec.name, ec.check)
 	}
 
-	authMgr, publisher, cleanupAuth := setupAuthAndNATS(ctx, cfg, logger)
+	authMgr, publisher, cleanupAuth, err := setupAuthAndNATS(ctx, cfg, logger)
+	if err != nil {
+		return err
+	}
 	defer cleanupAuth()
 
-	budgetCli, cleanupBudget := setupBudget(ctx, cfg, logger)
+	budgetCli, cleanupBudget, err := setupBudget(ctx, cfg, logger)
+	if err != nil {
+		return err
+	}
 	defer cleanupBudget()
 
-	svc := options.coreService
 	activeAuthMgr := options.authManager
 	if activeAuthMgr == nil {
 		activeAuthMgr = authMgr
 	}
+
+	checker.RegisterCheck("snapshot", func(_ context.Context) error {
+		if activeAuthMgr == nil || activeAuthMgr.GetSnapshot() == nil {
+			return errors.New("auth snapshot not loaded")
+		}
+		return nil
+	})
+	checker.RegisterCheck("budget", func(_ context.Context) error {
+		if budgetCli == nil && options.coreService == nil {
+			return errors.New("budget client not configured")
+		}
+		return nil
+	})
+
+	svc := options.coreService
 	if svc == nil {
-		r := setupRouter(cfg, publisher)
-		localCache := cache.New(cache.WithCapacity(10000), cache.WithTTL(5*time.Minute))
-		svc = core.NewService(core.ServiceConfig{
-			AuthManager:    activeAuthMgr,
-			BudgetClient:   budgetCli,
-			EventPublisher: publisher,
-			LocalCache:     localCache,
-			Router:         r,
-			Logger:         logger,
-		})
+		svc = buildCoreService(cfg, activeAuthMgr, budgetCli, publisher, logger)
 	}
 
 	mux := http.NewServeMux()
@@ -218,15 +284,19 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 	apiHandler := api.NewHandler(svc, activeAuthMgr)
 	apiHandler.RegisterRoutes(mux)
 
+	return startHTTPServer(ctx, cfg.HTTPPort, mux, logger)
+}
+
+func startHTTPServer(ctx context.Context, port int, handler http.Handler, logger *slog.Logger) error {
 	server := &http.Server{
-		Addr:              fmt.Sprintf("127.0.0.1:%d", cfg.HTTPPort),
-		Handler:           mux,
+		Addr:              fmt.Sprintf("127.0.0.1:%d", port),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	serverErr := make(chan error, 1)
 	go func() {
-		logger.Info("starting gateway service", slog.Int("port", cfg.HTTPPort))
+		logger.Info("starting gateway service", slog.Int("port", port))
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErr <- err
 		}

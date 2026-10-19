@@ -35,20 +35,20 @@ func (t *timeoutDecorator) Do(ctx context.Context, req *llm.Request) (*llm.Respo
 }
 
 func (t *timeoutDecorator) DoStream(ctx context.Context, req *llm.Request) (<-chan llm.Chunk, error) {
-	reqCtx, cancel := context.WithTimeout(ctx, t.timeout)
-	ch, err := t.inner.DoStream(reqCtx, req)
+	ch, err := t.inner.DoStream(ctx, req)
 	if err != nil {
-		cancel()
 		return nil, err
 	}
 
-	// Wrapper channel to ensure cancel is called when stream finishes
 	wrapped := make(chan llm.Chunk)
 	go func() {
-		defer cancel()
 		defer close(wrapped)
 		for c := range ch {
-			wrapped <- c
+			select {
+			case <-ctx.Done():
+				return
+			case wrapped <- c:
+			}
 		}
 	}()
 	return wrapped, nil

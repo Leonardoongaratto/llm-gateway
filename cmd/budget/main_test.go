@@ -286,3 +286,52 @@ func TestBudget_RunWithNATS(t *testing.T) {
 		t.Fatalf("run returned error: %v", err)
 	}
 }
+
+func TestBudget_AdminLimitsHTTP(t *testing.T) {
+	httpPort := getFreePort(t)
+	grpcPort := getFreePort(t)
+	cfg := Config{
+		ServiceName:    "budget",
+		HTTPPort:       httpPort,
+		GRPCPort:       grpcPort,
+		LogLevel:       "debug",
+		DatabaseDriver: "sqlite",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(ctx, cfg, WithLogWriter(io.Discard))
+	}()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d", httpPort)
+	waitForEndpoints(t, url)
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	defer client.CloseIdleConnections()
+
+	payload := `{"key_id":"test-key","daily_limit_micros":1000000,"monthly_limit_micros":5000000,"rpm":60}`
+	resp, err := client.Post(url+"/admin/limits", "application/json", strings.NewReader(payload))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on valid limits, got err: %v, resp: %v", err, resp)
+	}
+	_ = resp.Body.Close()
+
+	resp, err = client.Post(url+"/admin/limits", "application/json", strings.NewReader(`{"key_id":""}`))
+	if err != nil || resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 on empty key_id, got err: %v, resp: %v", err, resp)
+	}
+	_ = resp.Body.Close()
+
+	resp, err = client.Post(url+"/admin/limits", "application/json", strings.NewReader(`invalid-json`))
+	if err != nil || resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 on invalid json, got err: %v, resp: %v", err, resp)
+	}
+	_ = resp.Body.Close()
+
+	client.CloseIdleConnections()
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+}

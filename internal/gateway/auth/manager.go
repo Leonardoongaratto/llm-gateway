@@ -156,9 +156,9 @@ func (m *Manager) StartConfigWatcher(ctx context.Context, js jetstream.JetStream
 	defer cancel()
 
 	consumer, err := js.CreateOrUpdateConsumer(setupCtx, natsx.StreamConfig, jetstream.ConsumerConfig{
-		Durable:       "gateway-config-watcher",
 		FilterSubject: "lgw.config.changed.v1",
 		AckPolicy:     jetstream.AckExplicitPolicy,
+		DeliverPolicy: jetstream.DeliverNewPolicy,
 		MaxDeliver:    5,
 	})
 	if err != nil {
