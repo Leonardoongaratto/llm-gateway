@@ -33,6 +33,7 @@ import (
 	gatewaycache "github.com/Leonardoongaratto/llm-gateway/internal/gateway/cache"
 	gatewaycore "github.com/Leonardoongaratto/llm-gateway/internal/gateway/core"
 	gatewayevents "github.com/Leonardoongaratto/llm-gateway/internal/gateway/events"
+	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/provider"
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/provider/fake"
 	gatewayrouter "github.com/Leonardoongaratto/llm-gateway/internal/gateway/router"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/grpcx"
@@ -65,6 +66,7 @@ type Config struct {
 	BudgetGRPCPort   int
 	ControlGRPCPort  int
 	MockProvider     bool
+	Providers        map[string]provider.Provider
 	SeedDemo         bool
 	ImportClaudeCode bool
 	WebDir           string
@@ -108,6 +110,7 @@ type Cluster struct {
 	budgetStore  *budgetstore.Store
 	controlStore *controlstore.Store
 	usageStore   *usagestore.Store
+	authMgrs     []*gatewayauth.Manager
 
 	mu         sync.Mutex
 	cancelBdg  context.CancelFunc
@@ -182,6 +185,17 @@ func (c *Cluster) ControlStore() *controlstore.Store {
 func (c *Cluster) UsageStore() *usagestore.Store { return c.usageStore }
 func (c *Cluster) NATSConn() *nats.Conn          { return c.natsConn }
 func (c *Cluster) JS() jetstream.JetStream       { return c.js }
+
+func (c *Cluster) ReloadSnapshots(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, m := range c.authMgrs {
+		if err := m.LoadSnapshot(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func (c *Cluster) initNATS() error {
 	natsStore := filepath.Join(c.tempDir, "nats")
@@ -548,6 +562,13 @@ func (c *Cluster) buildGatewayCoreService(ctx context.Context) (*gatewaycore.Ser
 		return nil, nil, fmt.Errorf("gateway auth manager: %w", err)
 	}
 	_ = authMgr.LoadSnapshot(ctx)
+	if _, err := authMgr.StartConfigWatcher(ctx, c.js); err != nil {
+		c.logger.Warn("gateway auth config watcher failed to start", slog.Any("error", err))
+	}
+
+	c.mu.Lock()
+	c.authMgrs = append(c.authMgrs, authMgr)
+	c.mu.Unlock()
 
 	connBdg, err := grpcx.Dial(ctx, fmt.Sprintf("127.0.0.1:%d", c.cfg.BudgetGRPCPort))
 	if err != nil {
@@ -562,6 +583,9 @@ func (c *Cluster) buildGatewayCoreService(ctx context.Context) (*gatewaycore.Ser
 		r.Register("openai", fake.New(fake.WithName("openai"), fake.WithContent("Fake OpenAI response from dev server")))
 		r.Register("anthropic", fake.New(fake.WithName("anthropic"), fake.WithContent("Fake Anthropic response from dev server")))
 		r.Register("gemini", fake.New(fake.WithName("gemini"), fake.WithContent("Fake Gemini response from dev server")))
+	}
+	for name, prov := range c.cfg.Providers {
+		r.Register(name, prov)
 	}
 
 	localCache := gatewaycache.New(gatewaycache.WithCapacity(10000), gatewaycache.WithTTL(5*time.Minute))
