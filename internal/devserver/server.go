@@ -523,6 +523,11 @@ func (c *Cluster) startUsage(ctx context.Context) error {
 	if err := uc.Start(ctx); err != nil {
 		c.logger.Warn("usage consumer failed to start", slog.Any("error", err))
 	}
+	defer uc.Stop()
+	go func() {
+		<-ctx.Done()
+		uc.Stop()
+	}()
 
 	checker := health.New()
 	checker.RegisterCheck("usage_db", c.usageDB.PingContext)

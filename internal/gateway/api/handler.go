@@ -276,6 +276,7 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	llmReq := &llm.Request{
+		ID:          r.Header.Get("X-Request-Id"),
 		Model:       req.Model,
 		Messages:    req.Messages,
 		MaxTokens:   req.MaxTokens,
@@ -484,6 +485,7 @@ func (h *Handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	llmReq := &llm.Request{
+		ID:          r.Header.Get("X-Request-Id"),
 		Model:       req.Model,
 		Messages:    req.Messages,
 		MaxTokens:   req.MaxTokens,
