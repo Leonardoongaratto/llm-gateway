@@ -118,7 +118,7 @@ func (s *Store) enqueueOutboxTx(ctx context.Context, tx *sql.Tx, subject string,
 		return fmt.Errorf("failed to generate outbox message id: %w", err)
 	}
 
-	query := "INSERT INTO outbox (id, subject, payload, created_at) VALUES ($1, $2, $3, $4)"
+	query := "INSERT INTO control_outbox (id, subject, payload, created_at) VALUES ($1, $2, $3, $4)"
 	_, err = tx.ExecContext(ctx, query, msgID.String(), subject, string(payloadBytes), now)
 	if err != nil {
 		return fmt.Errorf("failed to insert outbox message: %w", err)
@@ -344,14 +344,12 @@ func (s *Store) RevokeKey(ctx context.Context, id string, revokedAt time.Time) e
 	}
 
 	cfgEvent := &eventsv1.ConfigChanged{
-		Kind:    eventsv1.ConfigChanged_KEY,
+		Kind:    eventsv1.ConfigChanged_KEY_REVOKED,
 		Version: newVersion,
 		KeyLimits: []*eventsv1.KeyLimit{
 			{
-				KeyId:              id,
-				DailyLimitMicros:   0,
-				MonthlyLimitMicros: 0,
-				Rpm:                0,
+				KeyId:   id,
+				Revoked: true,
 			},
 		},
 	}
@@ -570,7 +568,7 @@ func (s *Store) FetchPendingOutbox(ctx context.Context, limit int) ([]OutboxMess
 		limit = 50
 	}
 
-	query := "SELECT id, subject, payload, created_at FROM outbox WHERE published_at IS NULL ORDER BY created_at ASC, id ASC LIMIT $1"
+	query := "SELECT id, subject, payload, created_at FROM control_outbox WHERE published_at IS NULL ORDER BY created_at ASC, id ASC LIMIT $1"
 	rows, err := s.db.QueryContext(ctx, query, limit)
 	if err != nil {
 		return nil, err
@@ -605,7 +603,12 @@ func (s *Store) MarkOutboxPublished(ctx context.Context, ids []string, published
 		args[i+1] = id
 	}
 
-	query := fmt.Sprintf("UPDATE outbox SET published_at = $1 WHERE id IN (%s)", strings.Join(placeholders, ", "))
+	query := fmt.Sprintf("UPDATE control_outbox SET published_at = $1 WHERE id IN (%s)", strings.Join(placeholders, ", "))
 	_, err := s.db.ExecContext(ctx, query, args...)
 	return err
+}
+
+// Close closes the underlying database handle.
+func (s *Store) Close() error {
+	return s.db.Close()
 }

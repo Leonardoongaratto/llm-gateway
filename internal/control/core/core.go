@@ -23,7 +23,6 @@ var (
 	ErrInvalidKeyFormat    = errors.New("invalid virtual key format")
 	ErrKeyNotFound         = errors.New("virtual key not found")
 	ErrKeyRevoked          = errors.New("virtual key is revoked")
-	ErrKeyExpired          = errors.New("virtual key is expired")
 	ErrInvalidVirtualKey   = errors.New("invalid virtual key data")
 	ErrInvalidPricing      = errors.New("invalid pricing data")
 	ErrInvalidLogicalModel = errors.New("invalid logical model data")

@@ -49,6 +49,7 @@ message KeyLimit {
   int64 daily_limit_micros = 2;
   int64 monthly_limit_micros = 3;
   int32 rpm = 4;
+  bool revoked = 5;
 }
 
 message ConfigChanged {
@@ -57,6 +58,7 @@ message ConfigChanged {
     KEY = 1;
     PRICING = 2;
     MODELS = 3;
+    KEY_REVOKED = 4;
   }
   Kind kind = 1;
   int64 version = 2;

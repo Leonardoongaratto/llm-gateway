@@ -37,6 +37,9 @@ func (s *Server) GetSnapshot(ctx context.Context, _ *controlv1.GetSnapshotReques
 	now := time.Now().UTC()
 	keys := make([]*controlv1.KeyInfo, 0, len(snap.Keys))
 	for _, k := range snap.Keys {
+		if !k.IsActive(now) {
+			continue
+		}
 		var exp *timestamppb.Timestamp
 		if k.ExpiresAt != nil {
 			exp = timestamppb.New(*k.ExpiresAt)
@@ -46,7 +49,7 @@ func (s *Server) GetSnapshot(ctx context.Context, _ *controlv1.GetSnapshotReques
 			Name:               k.Name,
 			KeyHash:            k.KeyHash,
 			AllowedModels:      k.AllowedModels,
-			Active:             k.IsActive(now),
+			Active:             true,
 			ExpiresAt:          exp,
 			DailyLimitMicros:   int64(k.DailyLimitMicros),
 			MonthlyLimitMicros: int64(k.MonthlyLimitMicros),

@@ -34,8 +34,8 @@ type Config struct {
 	DatabaseDriver string `env:"DATABASE_DRIVER" default:"sqlite"`
 	DatabaseDSN    string `env:"DATABASE_DSN" default:""`
 	NATSURL        string `env:"NATS_URL" default:""`
-	AdminToken     string `env:"ADMIN_TOKEN" default:"dev-admin-token"`
-	KeyPepper      string `env:"KEY_PEPPER" default:"dev-pepper"`
+	AdminToken     string `env:"ADMIN_TOKEN,required"`
+	KeyPepper      string `env:"KEY_PEPPER,required"`
 }
 
 type namedCheck struct {

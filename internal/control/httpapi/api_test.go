@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -36,14 +37,6 @@ func (m *mockStore) CreateKey(_ context.Context, k core.VirtualKey) (*core.Virtu
 	}
 	k.CreatedAt = time.Now().UTC()
 	m.keys[k.ID] = k
-	return &k, nil
-}
-
-func (m *mockStore) GetKeyByID(_ context.Context, id string) (*core.VirtualKey, error) {
-	k, ok := m.keys[id]
-	if !ok {
-		return nil, core.ErrKeyNotFound
-	}
 	return &k, nil
 }
 
@@ -330,69 +323,47 @@ func TestStoreFailuresAndMalformedBodies(t *testing.T) {
 		KeyPepper:  "pepper",
 	})
 
-	// Malformed POST /admin/keys
-	reqBadJSON := httptest.NewRequest(http.MethodPost, "/admin/keys", strings.NewReader(`{bad`))
-	rrBadJSON := executeRequest(handler, reqBadJSON, "token")
-	if rrBadJSON.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 on malformed body, got %d", rrBadJSON.Code)
+	cases := []struct {
+		name       string
+		method     string
+		path       string
+		body       string
+		wantStatus int
+	}{
+		{"malformed body on create key", http.MethodPost, "/admin/keys", `{bad`, http.StatusBadRequest},
+		{"payload exceeding 1MB limit", http.MethodPost, "/admin/keys", strings.Repeat("x", 1024*1024+10), http.StatusBadRequest},
+		{"store error on create key", http.MethodPost, "/admin/keys", `{"name":"test"}`, http.StatusInternalServerError},
+		{"store error on list keys", http.MethodGet, "/admin/keys", "", http.StatusInternalServerError},
+		{"store error on revoke key", http.MethodDelete, "/admin/keys/k1", "", http.StatusInternalServerError},
+		{"store error on list pricing", http.MethodGet, "/admin/pricing", "", http.StatusInternalServerError},
+		{"store error on upsert pricing", http.MethodPut, "/admin/pricing", `[{"model":"m","provider":"p"}]`, http.StatusInternalServerError},
+		{"store error on list models", http.MethodGet, "/admin/models", "", http.StatusInternalServerError},
+		{"store error on upsert models", http.MethodPut, "/admin/models", `[{"name":"m","chain":["p"]}]`, http.StatusInternalServerError},
 	}
 
-	// Store error on CreateKey
-	reqCreate := httptest.NewRequest(http.MethodPost, "/admin/keys", strings.NewReader(`{"name":"test"}`))
-	rrCreate := executeRequest(handler, reqCreate, "token")
-	if rrCreate.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on store error, got %d", rrCreate.Code)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body io.Reader
+			if tc.body != "" {
+				body = strings.NewReader(tc.body)
+			}
+			req := httptest.NewRequest(tc.method, tc.path, body)
+			rr := executeRequest(handler, req, "token")
+			if rr.Code != tc.wantStatus {
+				t.Errorf("expected status %d, got %d", tc.wantStatus, rr.Code)
+			}
+		})
 	}
+}
 
-	// Store error on ListKeys
-	reqList := httptest.NewRequest(http.MethodGet, "/admin/keys", nil)
-	rrList := executeRequest(handler, reqList, "token")
-	if rrList.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on list keys store error, got %d", rrList.Code)
-	}
-
-	// Store error on RevokeKey
-	reqRevoke := httptest.NewRequest(http.MethodDelete, "/admin/keys/k1", nil)
-	rrRevoke := executeRequest(handler, reqRevoke, "token")
-	if rrRevoke.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on revoke store error, got %d", rrRevoke.Code)
-	}
-
-	// Store error on ListPricing
-	reqListP := httptest.NewRequest(http.MethodGet, "/admin/pricing", nil)
-	rrListP := executeRequest(handler, reqListP, "token")
-	if rrListP.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on list pricing store error, got %d", rrListP.Code)
-	}
-
-	// Store error on UpsertPricing
-	reqUpsertP := httptest.NewRequest(http.MethodPut, "/admin/pricing", strings.NewReader(`[{"model":"m","provider":"p"}]`))
-	rrUpsertP := executeRequest(handler, reqUpsertP, "token")
-	if rrUpsertP.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on upsert pricing store error, got %d", rrUpsertP.Code)
-	}
-
-	// Store error on ListModels
-	reqListM := httptest.NewRequest(http.MethodGet, "/admin/models", nil)
-	rrListM := executeRequest(handler, reqListM, "token")
-	if rrListM.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on list models store error, got %d", rrListM.Code)
-	}
-
-	// Store error on UpsertModels
-	reqUpsertM := httptest.NewRequest(http.MethodPut, "/admin/models", strings.NewReader(`[{"name":"m","chain":["p"]}]`))
-	rrUpsertM := executeRequest(handler, reqUpsertM, "token")
-	if rrUpsertM.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on upsert models store error, got %d", rrUpsertM.Code)
-	}
-
-	// Empty admin token config denies all
+func TestUnconfiguredAdminTokenDeniesAll(t *testing.T) {
+	fs := &failingStore{mockStore: *newMockStore()}
 	noTokenHandler := httpapi.NewHandler(fs, httpapi.Config{AdminToken: ""})
-	reqAny := httptest.NewRequest(http.MethodGet, "/admin/keys", nil)
-	reqAny.Header.Set("Authorization", "Bearer token")
-	rrAny := httptest.NewRecorder()
-	noTokenHandler.ServeHTTP(rrAny, reqAny)
-	if rrAny.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 when AdminToken is not configured, got %d", rrAny.Code)
+	req := httptest.NewRequest(http.MethodGet, "/admin/keys", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	rr := httptest.NewRecorder()
+	noTokenHandler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 when AdminToken is not configured, got %d", rr.Code)
 	}
 }

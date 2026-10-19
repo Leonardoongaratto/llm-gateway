@@ -3,6 +3,7 @@ package outbox_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -235,5 +236,59 @@ func TestRelay_Run_GracefulShutdownAndOptions(t *testing.T) {
 		}
 	case <-time.After(1 * time.Second):
 		t.Fatal("relay failed to shutdown within timeout")
+	}
+}
+
+func TestConfigConsumer_RevokedKey_DeletesLimits(t *testing.T) {
+	s, js := setupTestEnv(t)
+	ctx := context.Background()
+
+	keyID := "k-revoked-key"
+	if err := s.SetKeyLimits(ctx, core.KeyLimits{KeyID: keyID, DailyLimitMicros: 10000}); err != nil {
+		t.Fatalf("failed to set initial key limits: %v", err)
+	}
+
+	consumer, err := outbox.NewConfigConsumer(s, js)
+	if err != nil {
+		t.Fatalf("failed to create config consumer: %v", err)
+	}
+
+	consumeCtx, err := consumer.Start(ctx)
+	if err != nil {
+		t.Fatalf("failed to start config consumer: %v", err)
+	}
+	defer consumeCtx.Stop()
+
+	cfgEvent := &eventsv1.ConfigChanged{
+		Kind:    eventsv1.ConfigChanged_KEY_REVOKED,
+		Version: 2,
+		KeyLimits: []*eventsv1.KeyLimit{
+			{
+				KeyId:   keyID,
+				Revoked: true,
+			},
+		},
+	}
+	payload, err := protojson.Marshal(cfgEvent)
+	if err != nil {
+		t.Fatalf("failed to marshal protojson: %v", err)
+	}
+
+	if _, err := natsx.Publish(ctx, js, "lgw.config.changed.v1", payload, "revoked-msg-1"); err != nil {
+		t.Fatalf("failed to publish config changed event: %v", err)
+	}
+
+	var deleted bool
+	for attempt := 0; attempt < 40; attempt++ {
+		time.Sleep(50 * time.Millisecond)
+		_, err := s.Remaining(ctx, keyID, time.Now().UTC())
+		if errors.Is(err, core.ErrNotFound) {
+			deleted = true
+			break
+		}
+	}
+
+	if !deleted {
+		t.Fatal("expected key limits to be deleted after consuming revoked event")
 	}
 }

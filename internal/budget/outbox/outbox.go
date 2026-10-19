@@ -22,6 +22,7 @@ type Store interface {
 
 type LimitsStore interface {
 	SetKeyLimits(ctx context.Context, limits core.KeyLimits) error
+	DeleteKeyLimits(ctx context.Context, keyID string) error
 }
 
 type Relay struct {
@@ -164,6 +165,17 @@ func NewConfigConsumer(s LimitsStore, js jetstream.JetStream, opts ...ConsumerOp
 
 func (c *ConfigConsumer) applyKeyLimits(ctx context.Context, keyLimits []*eventsv1.KeyLimit) error {
 	for _, kl := range keyLimits {
+		if kl.Revoked {
+			if err := c.store.DeleteKeyLimits(ctx, kl.KeyId); err != nil {
+				c.logger.ErrorContext(ctx, "failed to delete revoked key limits from event",
+					slog.String("key_id", kl.KeyId),
+					slog.Any("error", err),
+				)
+				return err
+			}
+			continue
+		}
+
 		limits := core.KeyLimits{
 			KeyID:              kl.KeyId,
 			DailyLimitMicros:   money.Micros(kl.DailyLimitMicros),

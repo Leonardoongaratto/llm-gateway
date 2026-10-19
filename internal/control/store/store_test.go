@@ -60,7 +60,7 @@ func forEachStore(t *testing.T, fn func(t *testing.T, s *store.Store, name strin
 	for name, db := range createTestDBs(t) {
 		t.Run(name, func(t *testing.T) {
 			if name == "postgres" {
-				if _, err := db.Exec("TRUNCATE keys, pricing, logical_models, outbox CASCADE; UPDATE config_versions SET version = 1 WHERE id = 1;"); err != nil {
+				if _, err := db.Exec("TRUNCATE keys, pricing, logical_models, control_outbox CASCADE; UPDATE config_versions SET version = 1 WHERE id = 1;"); err != nil {
 					t.Fatalf("failed to truncate tables: %v", err)
 				}
 			}
@@ -179,30 +179,104 @@ func TestStore_RevokeKey(t *testing.T) {
 			t.Fatalf("failed to create key: %v", err)
 		}
 
+		initVer, err := s.GetCurrentVersion(ctx)
+		if err != nil {
+			t.Fatalf("unexpected version error: %v", err)
+		}
+
 		revokedAt := time.Date(2026, 10, 18, 22, 30, 0, 0, time.UTC)
 		if err := s.RevokeKey(ctx, "k-to-revoke", revokedAt); err != nil {
 			t.Fatalf("failed to revoke key: %v", err)
 		}
 
-		k, err := s.GetKeyByID(ctx, "k-to-revoke")
-		if err != nil {
-			t.Fatalf("failed to get revoked key: %v", err)
-		}
-		if k.RevokedAt == nil {
-			t.Fatal("expected revoked_at to be set")
-		}
-		if k.IsActive(time.Now()) {
-			t.Error("expected key to be inactive")
-		}
-
-		if err := s.RevokeKey(ctx, "k-to-revoke", revokedAt); !errors.Is(err, core.ErrKeyRevoked) {
-			t.Errorf("expected ErrKeyRevoked on second call, got %v", err)
-		}
-
-		if err := s.RevokeKey(ctx, "non-existent", revokedAt); !errors.Is(err, core.ErrKeyNotFound) {
-			t.Errorf("expected ErrKeyNotFound, got %v", err)
-		}
+		verifyRevokedKeyOutboxAndVersion(ctx, t, s, "k-to-revoke", initVer)
+		verifyRevocationStatuses(ctx, t, s, "k-to-revoke", revokedAt)
 	})
+}
+
+func verifyRevocationStatuses(ctx context.Context, t *testing.T, s *store.Store, keyID string, revokedAt time.Time) {
+	t.Helper()
+
+	k, err := s.GetKeyByID(ctx, keyID)
+	if err != nil {
+		t.Fatalf("failed to get revoked key: %v", err)
+	}
+	if k.RevokedAt == nil {
+		t.Fatal("expected revoked_at to be set")
+	}
+	if k.IsActive(time.Now()) {
+		t.Error("expected key to be inactive")
+	}
+
+	if err := s.RevokeKey(ctx, keyID, revokedAt); !errors.Is(err, core.ErrKeyRevoked) {
+		t.Errorf("expected ErrKeyRevoked on second call, got %v", err)
+	}
+
+	if err := s.RevokeKey(ctx, "non-existent", revokedAt); !errors.Is(err, core.ErrKeyNotFound) {
+		t.Errorf("expected ErrKeyNotFound, got %v", err)
+	}
+}
+
+func verifyRevokedKeyOutboxAndVersion(ctx context.Context, t *testing.T, s *store.Store, keyID string, initVer int64) {
+	t.Helper()
+
+	newVer, err := s.GetCurrentVersion(ctx)
+	if err != nil {
+		t.Fatalf("failed to query version after revoke: %v", err)
+	}
+	if newVer <= initVer {
+		t.Errorf("expected version after revoke > %d, got %d", initVer, newVer)
+	}
+
+	msgs, err := s.FetchPendingOutbox(ctx, 10)
+	if err != nil {
+		t.Fatalf("failed to fetch outbox: %v", err)
+	}
+	var found bool
+	for _, m := range msgs {
+		var event eventsv1.ConfigChanged
+		if err := protojson.Unmarshal([]byte(m.Payload), &event); err != nil {
+			continue
+		}
+		if event.Kind == eventsv1.ConfigChanged_KEY_REVOKED && len(event.KeyLimits) > 0 && event.KeyLimits[0].KeyId == keyID && event.KeyLimits[0].Revoked {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected outbox to contain KEY_REVOKED event with Revoked: true")
+	}
+}
+
+func verifyPricingOutboxAndVersion(ctx context.Context, t *testing.T, s *store.Store, initVer int64) {
+	t.Helper()
+
+	newVer, err := s.GetCurrentVersion(ctx)
+	if err != nil {
+		t.Fatalf("failed to query version after upsert pricing: %v", err)
+	}
+	if newVer <= initVer {
+		t.Errorf("expected version after upsert pricing > %d, got %d", initVer, newVer)
+	}
+
+	msgs, err := s.FetchPendingOutbox(ctx, 10)
+	if err != nil {
+		t.Fatalf("failed to fetch outbox: %v", err)
+	}
+	var found bool
+	for _, m := range msgs {
+		var event eventsv1.ConfigChanged
+		if err := protojson.Unmarshal([]byte(m.Payload), &event); err != nil {
+			continue
+		}
+		if event.Kind == eventsv1.ConfigChanged_PRICING {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected outbox to contain PRICING event")
+	}
 }
 
 func TestStore_PricingUpsertAndList(t *testing.T) {
@@ -227,9 +301,16 @@ func TestStore_PricingUpsertAndList(t *testing.T) {
 			},
 		}
 
+		initVer, err := s.GetCurrentVersion(ctx)
+		if err != nil {
+			t.Fatalf("unexpected version error: %v", err)
+		}
+
 		if err := s.UpsertPricing(ctx, items); err != nil {
 			t.Fatalf("failed to upsert pricing: %v", err)
 		}
+
+		verifyPricingOutboxAndVersion(ctx, t, s, initVer)
 
 		list, err := s.ListPricing(ctx)
 		if err != nil {

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,7 +18,6 @@ import (
 // Store defines persistence operations required by the administrative API.
 type Store interface {
 	CreateKey(ctx context.Context, key core.VirtualKey) (*core.VirtualKey, error)
-	GetKeyByID(ctx context.Context, id string) (*core.VirtualKey, error)
 	ListKeys(ctx context.Context) ([]core.VirtualKey, error)
 	RevokeKey(ctx context.Context, id string, revokedAt time.Time) error
 	ListPricing(ctx context.Context) ([]core.Pricing, error)
@@ -67,7 +67,7 @@ func (h *Handler) authenticate(r *http.Request) bool {
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 		return false
 	}
-	return parts[1] == h.cfg.AdminToken
+	return subtle.ConstantTimeCompare([]byte(parts[1]), []byte(h.cfg.AdminToken)) == 1
 }
 
 func (h *Handler) registerRoutes() {
@@ -90,8 +90,9 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-func decodeJSON(r io.Reader, v any) error {
-	data, err := io.ReadAll(r)
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		return err
 	}
@@ -156,7 +157,7 @@ type createKeyRequest struct {
 
 func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	var req createKeyRequest
-	if err := decodeJSON(r.Body, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -251,7 +252,7 @@ func (h *Handler) handleListPricing(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleUpsertPricing(w http.ResponseWriter, r *http.Request) {
 	var req []pricingDTO
-	if err := decodeJSON(r.Body, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -305,7 +306,7 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleUpsertModels(w http.ResponseWriter, r *http.Request) {
 	var req []logicalModelDTO
-	if err := decodeJSON(r.Body, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

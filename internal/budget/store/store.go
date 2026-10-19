@@ -114,6 +114,18 @@ ON CONFLICT (key_id) DO UPDATE SET
 	return nil
 }
 
+// DeleteKeyLimits removes limits for a key, causing any subsequent reservation to be denied.
+func (s *Store) DeleteKeyLimits(ctx context.Context, keyID string) error {
+	if s.isSQLite {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+	}
+
+	query := `DELETE FROM key_limits WHERE key_id = $1`
+	_, err := s.db.ExecContext(ctx, query, keyID)
+	return err
+}
+
 func (s *Store) queryKeyLimits(ctx context.Context, tx *sql.Tx, keyID string, forUpdate bool) (*core.KeyLimits, error) {
 	query := `SELECT daily_limit_micros, monthly_limit_micros, rpm FROM key_limits WHERE key_id = $1`
 	if !s.isSQLite && forUpdate {

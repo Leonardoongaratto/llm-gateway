@@ -42,6 +42,20 @@ func TestGetSnapshot_Success(t *testing.T) {
 				CreatedAt:          time.Now(),
 				ExpiresAt:          &future,
 			},
+			{
+				ID:        "k-revoked",
+				Name:      "Revoked Key",
+				KeyHash:   "peppered-hash-revoked",
+				CreatedAt: time.Now().Add(-2 * time.Hour),
+				RevokedAt: &future,
+			},
+			{
+				ID:        "k-expired",
+				Name:      "Expired Key",
+				KeyHash:   "peppered-hash-expired",
+				CreatedAt: time.Now().Add(-2 * time.Hour),
+				ExpiresAt: func() *time.Time { t := time.Now().Add(-1 * time.Hour); return &t }(),
+			},
 		},
 		Pricing: []core.Pricing{
 			{

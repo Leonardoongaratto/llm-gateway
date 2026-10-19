@@ -40,7 +40,7 @@ INSERT INTO config_versions (id, version, updated_at)
 VALUES (1, 1, CURRENT_TIMESTAMP)
 ON CONFLICT (id) DO NOTHING;
 
-CREATE TABLE IF NOT EXISTS outbox (
+CREATE TABLE IF NOT EXISTS control_outbox (
     id TEXT PRIMARY KEY,
     subject TEXT NOT NULL,
     payload TEXT NOT NULL,
@@ -48,4 +48,4 @@ CREATE TABLE IF NOT EXISTS outbox (
     published_at TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_control_outbox_pending ON outbox(published_at);
+CREATE INDEX IF NOT EXISTS idx_control_outbox_pending ON control_outbox(published_at);

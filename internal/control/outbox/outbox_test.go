@@ -61,7 +61,7 @@ func TestRelay_EmptyOutbox(t *testing.T) {
 	}
 }
 
-func verifyConsumedConfigEvent(ctx context.Context, t *testing.T, js jetstream.JetStream, expectedKeyID string) {
+func verifyConsumedConfigEvent(ctx context.Context, t *testing.T, js jetstream.JetStream, expectedKeyID, expectedMsgID string) {
 	t.Helper()
 
 	consumer, err := js.CreateOrUpdateConsumer(ctx, natsx.StreamConfig, jetstream.ConsumerConfig{
@@ -86,6 +86,10 @@ func verifyConsumedConfigEvent(ctx context.Context, t *testing.T, js jetstream.J
 	}
 	if received == nil {
 		t.Fatal("expected to receive config changed message from JetStream")
+	}
+
+	if expectedMsgID != "" && received.Headers().Get("Nats-Msg-Id") != expectedMsgID {
+		t.Errorf("expected Nats-Msg-Id header %q, got %q", expectedMsgID, received.Headers().Get("Nats-Msg-Id"))
 	}
 
 	var event eventsv1.ConfigChanged
@@ -137,7 +141,7 @@ func TestRelay_PublishesAndMarks(t *testing.T) {
 		t.Fatalf("expected 0 pending outbox messages after relay, got %d", len(pendingAfter))
 	}
 
-	verifyConsumedConfigEvent(ctx, t, js, key.ID)
+	verifyConsumedConfigEvent(ctx, t, js, key.ID, pendingBefore[0].ID)
 }
 
 func TestRelay_RunContextCancellation(t *testing.T) {

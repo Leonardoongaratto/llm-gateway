@@ -82,7 +82,10 @@ func waitForStatus(t *testing.T, url string, expectedCode int) {
 }
 
 func TestControl_DefaultConfigContract(t *testing.T) {
-	cfg, err := config.LoadFromEnv[Config]("LGW_NONEXISTENT_")
+	t.Setenv("LGW_TEST_ADMIN_TOKEN", "adm-secret")
+	t.Setenv("LGW_TEST_KEY_PEPPER", "pepper-secret")
+
+	cfg, err := config.LoadFromEnv[Config]("LGW_TEST_")
 	if err != nil {
 		t.Fatalf("failed to load default config: %v", err)
 	}
@@ -97,7 +100,18 @@ func TestControl_DefaultConfigContract(t *testing.T) {
 	}
 }
 
+func TestControl_RealMain_MissingRequiredSecretReturnsOne(t *testing.T) {
+	t.Setenv("LGW_ADMIN_TOKEN", "")
+	t.Setenv("LGW_KEY_PEPPER", "")
+	code := realMain()
+	if code != 1 {
+		t.Errorf("expected exit code 1 for missing required secrets, got %d", code)
+	}
+}
+
 func TestControl_RealMain_InvalidEnvReturnsOne(t *testing.T) {
+	t.Setenv("LGW_ADMIN_TOKEN", "adm-secret")
+	t.Setenv("LGW_KEY_PEPPER", "pepper-secret")
 	t.Setenv("LGW_HTTP_PORT", "not-an-int")
 	code := realMain()
 	if code != 1 {
@@ -119,12 +133,12 @@ func TestControl_Readyz503WithFailingCheck(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 
-	failingCheck := func(_ context.Context) error {
-		return errors.New("control database offline")
+	closeDBSeeder := func(s *store.Store) error {
+		return s.Close()
 	}
 
 	go func() {
-		errCh <- run(ctx, cfg, WithLogWriter(io.Discard), WithCheck("control_db", failingCheck))
+		errCh <- run(ctx, cfg, WithLogWriter(io.Discard), WithStoreSeeder(closeDBSeeder))
 	}()
 
 	url := fmt.Sprintf("http://127.0.0.1:%d/readyz", httpPort)
@@ -182,6 +196,8 @@ func TestControl_RunErrors(t *testing.T) {
 }
 
 func TestControl_RealMain_ServiceErrorReturnsOne(t *testing.T) {
+	t.Setenv("LGW_ADMIN_TOKEN", "valid-admin-token")
+	t.Setenv("LGW_KEY_PEPPER", "valid-key-pepper")
 	t.Setenv("LGW_DATABASE_DRIVER", "invalid-driver")
 	code := realMain()
 	if code != 1 {
