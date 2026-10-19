@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -92,12 +91,6 @@ func mapClientErrors(err error) (int, string, string, string, string, bool) {
 	var maxBytesErr *http.MaxBytesError
 	if errors.As(err, &maxBytesErr) {
 		return http.StatusRequestEntityTooLarge, "request body too large (maximum 10MB)", "invalid_request_error", "request_too_large", "", true
-	}
-
-	var jsonSyntaxErr *json.SyntaxError
-	var jsonUnmarshalTypeErr *json.UnmarshalTypeError
-	if errors.As(err, &jsonSyntaxErr) || errors.As(err, &jsonUnmarshalTypeErr) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-		return http.StatusBadRequest, "invalid json request body: " + err.Error(), "invalid_request_error", "invalid_request", "", true
 	}
 
 	var rateLimitErr *budgetclient.RateLimitError
@@ -243,7 +236,17 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 	var req openAIChatReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, err)
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeError(w, err)
+			return
+		}
+		writeError(w, &RequestError{
+			StatusCode: http.StatusBadRequest,
+			Message:    "invalid json request body",
+			Type:       "invalid_request_error",
+			Code:       "invalid_request",
+		})
 		return
 	}
 
@@ -441,7 +444,17 @@ func (h *Handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	var req anthropicReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeAnthropicError(w, err)
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeAnthropicError(w, err)
+			return
+		}
+		writeAnthropicError(w, &RequestError{
+			StatusCode: http.StatusBadRequest,
+			Message:    "invalid json request body",
+			Type:       "invalid_request_error",
+			Code:       "invalid_request",
+		})
 		return
 	}
 
@@ -567,7 +580,7 @@ func (h *Handler) streamAnthropic(w http.ResponseWriter, r *http.Request, rawKey
 		if chunk.Usage != nil {
 			finalOutputTokens = chunk.Usage.OutputTokens
 		} else if chunk.Content != "" {
-			estimatedOutputTokens += int64(len(chunk.Content)+3) / 4
+			estimatedOutputTokens += core.EstimateOutputTokens(chunk.Content)
 		}
 		if chunk.Content != "" {
 			deltaPayload, _ := json.Marshal(map[string]any{

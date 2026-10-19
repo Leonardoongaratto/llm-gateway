@@ -82,6 +82,7 @@ func waitForStatus(t *testing.T, url string, expectedCode int) {
 }
 
 func TestBudget_DefaultConfigContract(t *testing.T) {
+	t.Setenv("LGW_NONEXISTENT_ADMIN_TOKEN", "test-admin-token")
 	cfg, err := config.LoadFromEnv[Config]("LGW_NONEXISTENT_")
 	if err != nil {
 		t.Fatalf("failed to load default config: %v", err)
@@ -94,7 +95,16 @@ func TestBudget_DefaultConfigContract(t *testing.T) {
 	}
 }
 
+func TestBudget_RealMain_MissingAdminTokenReturnsOne(t *testing.T) {
+	t.Setenv("LGW_ADMIN_TOKEN", "")
+	code := realMain()
+	if code != 1 {
+		t.Errorf("expected exit code 1 for missing admin token, got %d", code)
+	}
+}
+
 func TestBudget_RealMain_InvalidEnvReturnsOne(t *testing.T) {
+	t.Setenv("LGW_ADMIN_TOKEN", "test-token")
 	t.Setenv("LGW_HTTP_PORT", "not-an-int")
 	code := realMain()
 	if code != 1 {
@@ -111,6 +121,7 @@ func TestBudget_RunAndEndpoints_AC1A11(t *testing.T) {
 		GRPCPort:       grpcPort,
 		LogLevel:       "debug",
 		DatabaseDriver: "sqlite",
+		AdminToken:     "test-admin-token",
 	}
 
 	var logBuf bytes.Buffer
@@ -184,6 +195,7 @@ func TestBudget_Readyz503WithFailingCheck(t *testing.T) {
 		GRPCPort:       grpcPort,
 		LogLevel:       "debug",
 		DatabaseDriver: "sqlite",
+		AdminToken:     "test-admin-token",
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -210,6 +222,7 @@ func TestBudget_RunErrors(t *testing.T) {
 	t.Run("invalid database driver", func(t *testing.T) {
 		cfg := Config{
 			DatabaseDriver: "unsupported-driver",
+			AdminToken:     "test-admin-token",
 		}
 		err := run(context.Background(), cfg, WithLogWriter(io.Discard))
 		if err == nil || !strings.Contains(err.Error(), "unsupported database driver") {
@@ -220,6 +233,7 @@ func TestBudget_RunErrors(t *testing.T) {
 	t.Run("failing seeder", func(t *testing.T) {
 		cfg := Config{
 			DatabaseDriver: "sqlite",
+			AdminToken:     "test-admin-token",
 		}
 		failingSeeder := func(_ *store.Store) error {
 			return errors.New("seeder failure")
@@ -237,6 +251,7 @@ func TestBudget_RunErrors(t *testing.T) {
 			GRPCPort:       getFreePort(t),
 			DatabaseDriver: "sqlite",
 			NATSURL:        "nats://127.0.0.1:1",
+			AdminToken:     "test-admin-token",
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		errCh := make(chan error, 1)
@@ -252,6 +267,7 @@ func TestBudget_RunErrors(t *testing.T) {
 }
 
 func TestBudget_RealMain_ServiceErrorReturnsOne(t *testing.T) {
+	t.Setenv("LGW_ADMIN_TOKEN", "test-token")
 	t.Setenv("LGW_DATABASE_DRIVER", "invalid-driver")
 	code := realMain()
 	if code != 1 {
@@ -270,6 +286,7 @@ func TestBudget_RunWithNATS(t *testing.T) {
 		LogLevel:       "debug",
 		DatabaseDriver: "sqlite",
 		NATSURL:        natsURL,
+		AdminToken:     "test-admin-token",
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -284,6 +301,34 @@ func TestBudget_RunWithNATS(t *testing.T) {
 	cancel()
 	if err := <-errCh; err != nil {
 		t.Fatalf("run returned error: %v", err)
+	}
+}
+
+func TestBudget_CheckAdminAuth_EmptyTokenFailsClosed(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodPost, "http://localhost/admin/limits", nil)
+	req.Header.Set("Authorization", "Bearer something")
+	if checkAdminAuth(req, "") {
+		t.Fatal("expected checkAdminAuth to return false when adminToken is empty")
+	}
+}
+
+func doAdminLimitsRequest(t *testing.T, client *http.Client, url, token, payload string, expectedStatus int) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url+"/admin/limits", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != expectedStatus {
+		t.Fatalf("expected status %d, got %d", expectedStatus, resp.StatusCode)
 	}
 }
 
@@ -311,56 +356,25 @@ func TestBudget_AdminLimitsHTTP(t *testing.T) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	defer client.CloseIdleConnections()
 
-	// 1. Unauthorized without token
-	payload := `{"key_id":"test-key","daily_limit_micros":1000000,"monthly_limit_micros":5000000,"rpm":60}`
-	req, _ := http.NewRequest(http.MethodPost, url+"/admin/limits", strings.NewReader(payload))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected 401 without token, got err: %v, resp: %v", err, resp)
-	}
-	_ = resp.Body.Close()
+	t.Run("unauthorized without token", func(t *testing.T) {
+		doAdminLimitsRequest(t, client, url, "", `{"key_id":"test-key","daily_limit_micros":1000000,"monthly_limit_micros":5000000,"rpm":60}`, http.StatusUnauthorized)
+	})
 
-	// 2. Authorized with valid token (and with BOM prefix)
-	bomPayload := "\xef\xbb\xbf" + payload
-	req, _ = http.NewRequest(http.MethodPost, url+"/admin/limits", strings.NewReader(bomPayload))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer test-admin-token")
-	resp, err = client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 with valid token and BOM, got err: %v, resp: %v", err, resp)
-	}
-	_ = resp.Body.Close()
+	t.Run("authorized with valid token", func(t *testing.T) {
+		doAdminLimitsRequest(t, client, url, "test-admin-token", `{"key_id":"test-key","daily_limit_micros":1000000,"monthly_limit_micros":5000000,"rpm":60}`, http.StatusOK)
+	})
 
-	// 3. Negative limits
-	req, _ = http.NewRequest(http.MethodPost, url+"/admin/limits", strings.NewReader(`{"key_id":"k","daily_limit_micros":-10}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer test-admin-token")
-	resp, err = client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 on negative limit, got err: %v, resp: %v", err, resp)
-	}
-	_ = resp.Body.Close()
+	t.Run("negative limits rejected", func(t *testing.T) {
+		doAdminLimitsRequest(t, client, url, "test-admin-token", `{"key_id":"k","daily_limit_micros":-10}`, http.StatusBadRequest)
+	})
 
-	// 4. Missing key_id
-	req, _ = http.NewRequest(http.MethodPost, url+"/admin/limits", strings.NewReader(`{"key_id":""}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer test-admin-token")
-	resp, err = client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 on empty key_id, got err: %v, resp: %v", err, resp)
-	}
-	_ = resp.Body.Close()
+	t.Run("missing key_id rejected", func(t *testing.T) {
+		doAdminLimitsRequest(t, client, url, "test-admin-token", `{"key_id":""}`, http.StatusBadRequest)
+	})
 
-	// 5. Invalid JSON
-	req, _ = http.NewRequest(http.MethodPost, url+"/admin/limits", strings.NewReader(`invalid-json`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer test-admin-token")
-	resp, err = client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 on invalid json, got err: %v, resp: %v", err, resp)
-	}
-	_ = resp.Body.Close()
+	t.Run("invalid json rejected", func(t *testing.T) {
+		doAdminLimitsRequest(t, client, url, "test-admin-token", `invalid-json`, http.StatusBadRequest)
+	})
 
 	client.CloseIdleConnections()
 	cancel()

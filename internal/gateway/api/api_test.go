@@ -23,6 +23,7 @@ import (
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/core"
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/provider"
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/provider/fake"
+	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/provider/openai"
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/router"
 	"github.com/Leonardoongaratto/llm-gateway/internal/kernel/llm"
 )
@@ -753,28 +754,79 @@ func assertErrorPayloadFormat(t *testing.T, endpoint string, body map[string]int
 	}
 }
 
+type invalidRequestTestCase struct {
+	name        string
+	endpoint    string
+	payload     string
+	expectedMsg string
+}
+
+func executeInvalidRequestBodyTest(t *testing.T, client *http.Client, url string, tc invalidRequestTestCase) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url+tc.endpoint, strings.NewReader(tc.payload))
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testRawKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request, got %d", resp.StatusCode)
+	}
+
+	var body map[string]interface{}
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	assertErrorPayloadFormat(t, tc.endpoint, body)
+	if tc.expectedMsg != "" {
+		errMap, _ := body["error"].(map[string]interface{})
+		if msg, _ := errMap["message"].(string); msg != tc.expectedMsg {
+			t.Errorf("expected message %q, got %q", tc.expectedMsg, msg)
+		}
+	}
+}
+
 func TestAPI_InvalidRequest_MalformedAndMissingFields(t *testing.T) {
 	ts, _, _ := setupAPITestServer()
 	defer ts.Close()
 
 	client := &http.Client{Timeout: 2 * time.Second}
 
-	cases := []struct {
-		name     string
-		endpoint string
-		payload  string
-	}{
-		{"chat malformed json", "/v1/chat/completions", `{"model": "fake-model", invalid`},
-		{"messages malformed json", "/v1/messages", `{"model": "fake-model", invalid`},
-		{"chat missing model", "/v1/chat/completions", `{"messages":[{"role":"user","content":"hi"}]}`},
-		{"messages missing model", "/v1/messages", `{"messages":[{"role":"user","content":"hi"}]}`},
-		{"chat missing messages", "/v1/chat/completions", `{"model":"fake-model"}`},
-		{"messages missing messages", "/v1/messages", `{"model":"fake-model"}`},
+	cases := []invalidRequestTestCase{
+		{"chat malformed json", "/v1/chat/completions", `{"model": "fake-model", invalid`, "invalid json request body"},
+		{"messages malformed json", "/v1/messages", `{"model": "fake-model", invalid`, "invalid json request body"},
+		{"chat missing model", "/v1/chat/completions", `{"messages":[{"role":"user","content":"hi"}]}`, "model is required"},
+		{"messages missing model", "/v1/messages", `{"messages":[{"role":"user","content":"hi"}]}`, "model is required"},
+		{"chat missing messages", "/v1/chat/completions", `{"model":"fake-model"}`, "messages is required and must not be empty"},
+		{"messages missing messages", "/v1/messages", `{"model":"fake-model"}`, "messages is required and must not be empty"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req, _ := http.NewRequest(http.MethodPost, ts.URL+tc.endpoint, strings.NewReader(tc.payload))
+			executeInvalidRequestBodyTest(t, client, ts.URL, tc)
+		})
+	}
+}
+
+func TestAPI_MaxBytesError_Returns413(t *testing.T) {
+	ts, _, _ := setupAPITestServer()
+	defer ts.Close()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	largePayload := `{"model":"fake-model","messages":[{"role":"user","content":"` + strings.Repeat("a", 10<<20+100) + `"}]}`
+
+	endpoints := []string{"/v1/chat/completions", "/v1/messages"}
+	for _, ep := range endpoints {
+		t.Run(ep, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, ts.URL+ep, strings.NewReader(largePayload))
+			if err != nil {
+				t.Fatalf("failed to create request: %v", err)
+			}
 			req.Header.Set("Authorization", "Bearer "+testRawKey)
 			req.Header.Set("Content-Type", "application/json")
 
@@ -784,13 +836,92 @@ func TestAPI_InvalidRequest_MalformedAndMissingFields(t *testing.T) {
 			}
 			defer resp.Body.Close()
 
-			if resp.StatusCode != http.StatusBadRequest {
-				t.Errorf("expected 400 Bad Request, got %d", resp.StatusCode)
+			if resp.StatusCode != http.StatusRequestEntityTooLarge {
+				t.Errorf("expected 413 Request Entity Too Large, got %d", resp.StatusCode)
 			}
 
 			var body map[string]interface{}
 			_ = json.NewDecoder(resp.Body).Decode(&body)
-			assertErrorPayloadFormat(t, tc.endpoint, body)
+			assertErrorPayloadFormat(t, ep, body)
 		})
+	}
+}
+
+func TestAPI_UpstreamTruncatedJSON_Returns502(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":`))
+	}))
+	defer upstream.Close()
+
+	authMgr, _ := auth.NewManager(testPepper, nil)
+	keyHash := hashKey(testRawKey, testPepper)
+
+	authMgr.UpdateSnapshot(&auth.Snapshot{
+		Version: 1,
+		KeysByHash: map[string]*auth.KeyInfo{
+			keyHash: {
+				ID:            "key-api-1",
+				AllowedModels: []string{"gpt-truncated"},
+				Active:        true,
+			},
+		},
+		Pricing: map[string]*auth.PricingInfo{
+			"gpt-truncated": {
+				Model:               "gpt-truncated",
+				Provider:            "openai",
+				InputPerMTokMicros:  1_000_000,
+				OutputPerMTokMicros: 2_000_000,
+			},
+		},
+		LogicalModels: map[string][]string{
+			"gpt-truncated": {"gpt-truncated"},
+		},
+	})
+
+	mockBudget := &mockBudgetClient{}
+	localCache := cache.New(cache.WithCapacity(100), cache.WithTTL(5*time.Minute))
+	r := router.New()
+	p := openai.New("key", openai.WithBaseURL(upstream.URL))
+	r.Register("gpt-truncated", p)
+
+	svc := core.NewService(core.ServiceConfig{
+		AuthManager:    authMgr,
+		BudgetClient:   mockBudget,
+		EventPublisher: &mockEventPublisher{},
+		LocalCache:     localCache,
+		Router:         r,
+	})
+
+	handler := api.NewHandler(svc, authMgr)
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := bytes.NewBufferString(`{"model":"gpt-truncated","messages":[{"role":"user","content":"hello"}]}`)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/chat/completions", body)
+	req.Header.Set("Authorization", "Bearer "+testRawKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected 502 Bad Gateway for upstream truncated JSON, got %d", resp.StatusCode)
+	}
+
+	var respBody map[string]interface{}
+	_ = json.NewDecoder(resp.Body).Decode(&respBody)
+	errObj, ok := respBody["error"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected error object, got: %v", respBody)
+	}
+	if errObj["code"] != "all_providers_failed" {
+		t.Errorf("expected error code 'all_providers_failed', got %v", errObj["code"])
 	}
 }

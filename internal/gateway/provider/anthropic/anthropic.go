@@ -181,7 +181,11 @@ func (a *Adapter) Do(ctx context.Context, req *llm.Request) (*llm.Response, erro
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return nil, &provider.UpstreamError{
+			StatusCode: http.StatusBadGateway,
+			Message:    "failed to read response body: " + err.Error(),
+			Retryable:  true,
+		}
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -190,7 +194,11 @@ func (a *Adapter) Do(ctx context.Context, req *llm.Request) (*llm.Response, erro
 
 	var parsed anthropicResponse
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+		return nil, &provider.UpstreamError{
+			StatusCode: http.StatusBadGateway,
+			Message:    "failed to unmarshal response: " + err.Error(),
+			Retryable:  true,
+		}
 	}
 
 	var text strings.Builder

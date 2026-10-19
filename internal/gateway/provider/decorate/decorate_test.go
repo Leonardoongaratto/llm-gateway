@@ -200,23 +200,38 @@ func TestWithBreaker_StreamHalfOpenCancelDoesNotDeadlock(t *testing.T) {
 		_, _ = cb.Do(context.Background(), req)
 	}
 
-	time.Sleep(60 * time.Millisecond)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	stream, err := cb.DoStream(ctx, req)
-	if err != nil {
-		t.Fatalf("expected stream to be allowed in half-open, got %v", err)
+	cooldownDeadline := time.Now().Add(2 * time.Second)
+	var stream <-chan llm.Chunk
+	var ctx context.Context
+	var cancel context.CancelFunc
+	for time.Now().Before(cooldownDeadline) {
+		ctx, cancel = context.WithCancel(context.Background())
+		var streamErr error
+		stream, streamErr = cb.DoStream(ctx, req)
+		if streamErr == nil {
+			break
+		}
+		cancel()
+		time.Sleep(10 * time.Millisecond)
+	}
+	if stream == nil {
+		t.Fatal("expected stream to be allowed after cooldown")
 	}
 
 	<-stream
 	cancel()
 
-	time.Sleep(50 * time.Millisecond)
-	resp, err := cb.Do(context.Background(), req)
-	if err != nil {
-		t.Fatalf("expected next call to execute after stream cancel in half-open, got %v", err)
+	execDeadline := time.Now().Add(2 * time.Second)
+	var resp *llm.Response
+	var err error
+	for time.Now().Before(execDeadline) {
+		resp, err = cb.Do(context.Background(), req)
+		if err == nil && resp != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if resp == nil {
-		t.Fatal("expected non-nil response")
+	if err != nil || resp == nil {
+		t.Fatalf("expected next call to execute after stream cancel in half-open, got err: %v", err)
 	}
 }

@@ -197,3 +197,28 @@ func TestAnthropicAdapter_Do_NetworkError_IsRetryable(t *testing.T) {
 		t.Errorf("network connection error must be retryable UpstreamError")
 	}
 }
+
+func TestAnthropicAdapter_Do_TruncatedJSON_Returns502Retryable(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":`))
+	}))
+	defer ts.Close()
+
+	adapter := anthropic.New("key", anthropic.WithBaseURL(ts.URL))
+	_, err := adapter.Do(context.Background(), &llm.Request{Model: "claude"})
+	if err == nil {
+		t.Fatal("expected error on truncated JSON, got nil")
+	}
+	var upstreamErr *provider.UpstreamError
+	if !errors.As(err, &upstreamErr) {
+		t.Fatalf("expected UpstreamError, got %T: %v", err, err)
+	}
+	if upstreamErr.StatusCode != http.StatusBadGateway {
+		t.Errorf("expected status 502, got %d", upstreamErr.StatusCode)
+	}
+	if !upstreamErr.Retryable {
+		t.Errorf("expected truncated JSON error to be retryable")
+	}
+}

@@ -278,12 +278,20 @@ func sendChunk(ctx context.Context, chunk llm.Chunk, out chan<- llm.Chunk) bool 
 	}
 }
 
+// EstimateOutputTokens estimates token count from output text using the standard (len+3)/4 heuristic.
+func EstimateOutputTokens(content string) int64 {
+	if content == "" {
+		return 0
+	}
+	return int64(len(content)+3) / 4
+}
+
 func processChunk(chunk llm.Chunk, finalUsage *llm.Usage, estimatedTokens int64) (*llm.Usage, int64) {
 	if chunk.Usage != nil {
 		return chunk.Usage, estimatedTokens
 	}
 	if chunk.Content != "" {
-		return finalUsage, estimatedTokens + int64(len(chunk.Content)+3)/4
+		return finalUsage, estimatedTokens + EstimateOutputTokens(chunk.Content)
 	}
 	return finalUsage, estimatedTokens
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/subtle"
 	"database/sql"
@@ -43,7 +42,7 @@ type Config struct {
 	DatabaseDriver string `env:"DATABASE_DRIVER" default:"sqlite"`
 	DatabaseDSN    string `env:"DATABASE_DSN" default:""`
 	NATSURL        string `env:"NATS_URL" default:""`
-	AdminToken     string `env:"ADMIN_TOKEN" default:""`
+	AdminToken     string `env:"ADMIN_TOKEN,required"`
 }
 
 type namedCheck struct {
@@ -222,7 +221,7 @@ type adminLimitsRequest struct {
 
 func checkAdminAuth(r *http.Request, adminToken string) bool {
 	if adminToken == "" {
-		return true
+		return false
 	}
 	authHeader := r.Header.Get("Authorization")
 	parts := strings.SplitN(authHeader, " ", 2)
@@ -238,7 +237,6 @@ func parseAdminLimitsRequest(w http.ResponseWriter, r *http.Request) (*adminLimi
 	if err != nil {
 		return nil, errors.New("invalid request body")
 	}
-	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
 
 	var req adminLimitsRequest
 	if err := json.Unmarshal(data, &req); err != nil {

@@ -12,6 +12,24 @@ if (-not (Test-Path $binDir)) {
     New-Item -ItemType Directory -Path $binDir -Force | Out-Null
 }
 
+function Invoke-CurlBinary {
+    param(
+        [string[]]$CurlArgs,
+        [string]$Payload
+    )
+    if ($Payload) {
+        $tmpFile = Join-Path $env:TEMP ("lgw_rt_" + [guid]::NewGuid().ToString("N") + ".json")
+        try {
+            [System.IO.File]::WriteAllText($tmpFile, $Payload, [System.Text.UTF8Encoding]::new($false))
+            & curl.exe @CurlArgs "--data-binary" "@$tmpFile"
+        } finally {
+            if (Test-Path $tmpFile) { Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue }
+        }
+    } else {
+        & curl.exe @CurlArgs
+    }
+}
+
 Get-Process edge, gateway, control, budget, usage, fakeupstream -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$binDir*" } | Stop-Process -Force
 
 $upstreamService = @{ Name = "fakeupstream"; Cmd = "./scripts/fakeupstream"; Exe = Join-Path $binDir "fakeupstream.exe"; Port = 8999 }
@@ -94,7 +112,7 @@ try {
     $adminBase = "http://127.0.0.1:8790"
 
     $pricingPayload = '[{"model":"gpt-4o","provider":"openai","input_per_mtok_micros":5000000,"output_per_mtok_micros":15000000}]'
-    $pricingCode = $pricingPayload | & curl.exe -s -o /dev/null -w "%{http_code}" -X PUT -H "Authorization: Bearer runtime-admin-token" -H "Content-Type: application/json" -d '@-' "$adminBase/admin/pricing"
+    $pricingCode = Invoke-CurlBinary -CurlArgs @("-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "PUT", "-H", "Authorization: Bearer runtime-admin-token", "-H", "Content-Type: application/json", "$adminBase/admin/pricing") -Payload $pricingPayload
     if ($pricingCode -ne "200") {
         Write-Error "control PUT /admin/pricing failed with HTTP $pricingCode"
         exit 1
@@ -102,7 +120,7 @@ try {
     Write-Host "  [OK] control: seeded pricing for model gpt-4o"
 
     $createPayload = '{"name":"runtime-key","rpm":60}'
-    $createResp = $createPayload | & curl.exe -s -X POST -H "Authorization: Bearer runtime-admin-token" -H "Content-Type: application/json" -d '@-' "$adminBase/admin/keys"
+    $createResp = Invoke-CurlBinary -CurlArgs @("-s", "-X", "POST", "-H", "Authorization: Bearer runtime-admin-token", "-H", "Content-Type: application/json", "$adminBase/admin/keys") -Payload $createPayload | Out-String
     $createdKey = $createResp | ConvertFrom-Json
     if (-not $createdKey.id -or -not $createdKey.key) {
         Write-Error "control POST /admin/keys failed: $createResp"
@@ -112,7 +130,7 @@ try {
     Write-Host "  [OK] control: created virtual key $($createdKey.id) (key prefix: $($rawVirtualKey.Substring(0, 4)))"
 
     $limitsPayload = '{"key_id":"' + $createdKey.id + '","rpm":60,"daily_limit_micros":1000000000,"monthly_limit_micros":10000000000}'
-    $limitsCode = $limitsPayload | & curl.exe -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer runtime-admin-token" -H "Content-Type: application/json" -d '@-' "http://127.0.0.1:8792/admin/limits"
+    $limitsCode = Invoke-CurlBinary -CurlArgs @("-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST", "-H", "Authorization: Bearer runtime-admin-token", "-H", "Content-Type: application/json", "http://127.0.0.1:8792/admin/limits") -Payload $limitsPayload
     if ($limitsCode -ne "200") {
         Write-Error "budget POST /admin/limits failed with HTTP $limitsCode"
         exit 1
@@ -176,7 +194,7 @@ try {
     Write-Host "==> Validating POST /v1/chat/completions (unary)..."
     $chatPayload = '{"model":"gpt-4o","messages":[{"role":"user","content":"Hello gateway"}]}'
     $headerFile = Join-Path $binDir "headers.txt"
-    $chatResp = $chatPayload | & curl.exe -s -D $headerFile -H "Authorization: Bearer $rawVirtualKey" -H "Content-Type: application/json" -d '@-' "$gwBase/v1/chat/completions"
+    $chatResp = Invoke-CurlBinary -CurlArgs @("-s", "-D", $headerFile, "-H", "Authorization: Bearer $rawVirtualKey", "-H", "Content-Type: application/json", "$gwBase/v1/chat/completions") -Payload $chatPayload | Out-String
     $headers = Get-Content $headerFile -Raw
     if ($headers -notmatch "HTTP/1.1 200") {
         Write-Error "gateway POST /v1/chat/completions failed: headers=$headers body=$chatResp"
@@ -198,7 +216,7 @@ try {
 
     Write-Host "==> Validating POST /v1/chat/completions (streaming)..."
     $streamPayload = '{"model":"gpt-4o","messages":[{"role":"user","content":"Stream gateway"}],"stream":true}'
-    $streamResp = $streamPayload | & curl.exe -s -N -H "Authorization: Bearer $rawVirtualKey" -H "Content-Type: application/json" -d '@-' "$gwBase/v1/chat/completions" | Out-String
+    $streamResp = Invoke-CurlBinary -CurlArgs @("-s", "-N", "-H", "Authorization: Bearer $rawVirtualKey", "-H", "Content-Type: application/json", "$gwBase/v1/chat/completions") -Payload $streamPayload | Out-String
     if (-not $streamResp.Contains("data: [DONE]")) {
         Write-Error "gateway streaming did not return data: [DONE]: $streamResp"
         exit 1
@@ -211,7 +229,7 @@ try {
 
     Write-Host "==> Validating POST /v1/messages (Anthropic)..."
     $msgPayload = '{"model":"gpt-4o","max_tokens":100,"messages":[{"role":"user","content":"Hello anthropic"}]}'
-    $msgResp = $msgPayload | & curl.exe -s -H "Authorization: Bearer $rawVirtualKey" -H "Content-Type: application/json" -d '@-' "$gwBase/v1/messages" | Out-String
+    $msgResp = Invoke-CurlBinary -CurlArgs @("-s", "-H", "Authorization: Bearer $rawVirtualKey", "-H", "Content-Type: application/json", "$gwBase/v1/messages") -Payload $msgPayload | Out-String
     if (-not $msgResp.Contains('"type":"message"')) {
         Write-Error "gateway POST /v1/messages failed: $msgResp"
         exit 1
