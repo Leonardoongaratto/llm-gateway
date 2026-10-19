@@ -121,11 +121,11 @@ func (p *Provider) recordCall(req *llm.Request) error {
 		idx := p.calls - 1
 		if idx < len(p.errorSeq) {
 			err = p.errorSeq[idx]
+		} else if len(p.errorSeq) == 1 {
+			err = p.errorSeq[0]
 		}
 	}
-	delay := p.delay
 	p.mu.Unlock()
-	_ = delay
 	return err
 }
 
