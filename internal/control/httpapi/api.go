@@ -1,9 +1,11 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -88,6 +90,15 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+func decodeJSON(r io.Reader, v any) error {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+	return json.Unmarshal(data, v)
+}
+
 type keyResponse struct {
 	ID                 string     `json:"id"`
 	Name               string     `json:"name"`
@@ -145,7 +156,7 @@ type createKeyRequest struct {
 
 func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	var req createKeyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r.Body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -240,7 +251,7 @@ func (h *Handler) handleListPricing(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleUpsertPricing(w http.ResponseWriter, r *http.Request) {
 	var req []pricingDTO
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r.Body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -294,7 +305,7 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleUpsertModels(w http.ResponseWriter, r *http.Request) {
 	var req []logicalModelDTO
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r.Body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
