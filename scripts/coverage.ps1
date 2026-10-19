@@ -38,16 +38,31 @@ if ($failed) { exit 1 }
 
 $statements = 0
 $covered = 0
-foreach ($coverFile in $coverFiles) {
+$packageResults = @()
+for ($i = 0; $i -lt $packages.Count; $i++) {
+    $pkg = $packages[$i]
+    $coverFile = $coverFiles[$i]
+    $pkgStatements = 0
+    $pkgCovered = 0
     if (Test-Path $coverFile) {
         foreach ($line in Get-Content $coverFile | Select-Object -Skip 1) {
             $parts = $line -split ' '
             if ($parts.Length -ge 3) {
                 $count = [int]$parts[1]
                 $hits = [int]$parts[2]
-                $statements += $count
-                if ($hits -gt 0) { $covered += $count }
+                $pkgStatements += $count
+                if ($hits -gt 0) { $pkgCovered += $count }
             }
+        }
+    }
+    $statements += $pkgStatements
+    $covered += $pkgCovered
+    if ($pkgStatements -gt 0) {
+        $pkgPercent = [math]::Round(100 * $pkgCovered / $pkgStatements, 1)
+        $packageResults += [PSCustomObject]@{
+            Package = $pkg -replace '^github.com/Leonardoongaratto/llm-gateway/', ''
+            Coverage = "$pkgPercent%"
+            Statements = "$pkgCovered/$pkgStatements"
         }
     }
 }
@@ -58,6 +73,7 @@ if ($statements -eq 0) {
 }
 
 $percent = [math]::Round(100 * $covered / $statements, 1)
+$packageResults | Format-Table -AutoSize | Out-String | Write-Host
 Write-Host "Go total coverage: $percent% ($covered/$statements statements), threshold $Threshold%"
 if ($percent -lt $Threshold) {
     Write-Error "Coverage $percent% is below threshold of $Threshold%"

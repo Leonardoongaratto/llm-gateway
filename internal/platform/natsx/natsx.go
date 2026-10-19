@@ -215,9 +215,21 @@ func forwardToDLQ(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg
 
 // ConsumeWithDLQ consumes messages from a consumer, retrying with backoff up to maxDeliver,
 // and moving to DLQ when maxDeliver is exceeded.
+//
+// The consumer's MaxDeliver configuration should be greater than maxDeliver (or -1/unlimited)
+// to prevent NATS from dropping the message before the handler can forward it to the DLQ.
 func ConsumeWithDLQ(ctx context.Context, js jetstream.JetStream, consumer jetstream.Consumer, handler MessageHandler, maxDeliver int) (jetstream.ConsumeContext, error) {
 	if maxDeliver <= 0 {
 		maxDeliver = MaxDeliverDefault
+	}
+
+	if info, err := consumer.Info(ctx); err == nil && info != nil {
+		if info.Config.MaxDeliver > 0 && info.Config.MaxDeliver <= maxDeliver {
+			slog.WarnContext(ctx, "consumer MaxDeliver should be greater than ConsumeWithDLQ maxDeliver to prevent orphan message drops",
+				slog.Int("consumer_max_deliver", info.Config.MaxDeliver),
+				slog.Int("dlq_max_deliver", maxDeliver),
+			)
+		}
 	}
 
 	return consumer.Consume(func(msg jetstream.Msg) {

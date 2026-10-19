@@ -148,6 +148,26 @@ func shouldRetry(err error) bool {
 	return ok && st.Code() == codes.Unavailable
 }
 
+func executeAttempt(callCtx context.Context, attempt int, invoker grpc.UnaryInvoker, method string, req, reply any, cc *grpc.ClientConn, opts []grpc.CallOption) (bool, error) {
+	if err := waitWithJitter(callCtx, attempt); err != nil {
+		return true, status.FromContextError(err).Err()
+	}
+
+	err := invoker(callCtx, method, req, reply, cc, opts...)
+	if err == nil {
+		return true, nil
+	}
+
+	if !shouldRetry(err) || callCtx.Err() != nil {
+		if callCtx.Err() != nil {
+			return true, status.FromContextError(callCtx.Err()).Err()
+		}
+		return true, err
+	}
+
+	return false, err
+}
+
 func clientUnaryInterceptor(cfg *clientConfig) grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		callCtx := ctx
@@ -159,19 +179,11 @@ func clientUnaryInterceptor(cfg *clientConfig) grpc.UnaryClientInterceptor {
 
 		var lastErr error
 		for attempt := 0; attempt <= cfg.maxRetries; attempt++ {
-			if err := waitWithJitter(callCtx, attempt); err != nil {
+			done, err := executeAttempt(callCtx, attempt, invoker, method, req, reply, cc, opts)
+			if done {
 				return err
 			}
-
-			err := invoker(callCtx, method, req, reply, cc, opts...)
-			if err == nil {
-				return nil
-			}
-
 			lastErr = err
-			if !shouldRetry(err) || callCtx.Err() != nil {
-				return err
-			}
 		}
 
 		return lastErr
