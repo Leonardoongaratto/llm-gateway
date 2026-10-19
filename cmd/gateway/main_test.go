@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/auth"
+	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/core"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/config"
 )
 
@@ -157,5 +159,52 @@ func TestGateway_Readyz503WithFailingCheck(t *testing.T) {
 	cancel()
 	if err := <-errCh; err != nil {
 		t.Fatalf("run returned error: %v", err)
+	}
+}
+
+func TestGateway_WithCustomCoreService(t *testing.T) {
+	port := getFreePort(t)
+	cfg := Config{
+		ServiceName: "gateway",
+		HTTPPort:    port,
+		LogLevel:    "debug",
+	}
+
+	authMgr, _ := auth.NewManager("test-pepper", nil)
+	authMgr.UpdateSnapshot(&auth.Snapshot{
+		Version: 1,
+		Pricing: map[string]*auth.PricingInfo{
+			"model-test": {Model: "model-test"},
+		},
+	})
+	svc := core.NewService(core.ServiceConfig{
+		AuthManager: authMgr,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- run(ctx, cfg, WithLogWriter(io.Discard), WithCoreService(svc, authMgr))
+	}()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/livez", port)
+	waitForStatus(t, url, http.StatusOK)
+
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+}
+
+func TestGateway_SetupRouter(t *testing.T) {
+	cfg := Config{
+		AnthropicAPIKey: "ant-key",
+		OpenAIAPIKey:    "oai-key",
+		GeminiAPIKey:    "gem-key",
+	}
+	r := setupRouter(cfg, nil)
+	if r == nil {
+		t.Fatal("expected non-nil router")
 	}
 }
