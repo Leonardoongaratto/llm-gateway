@@ -134,6 +134,17 @@ func (c *Cluster) Errors() <-chan error {
 	return c.errChan
 }
 
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
 type Option func(*Cluster)
 
 func WithLogWriter(w io.Writer) Option {
@@ -151,6 +162,10 @@ func NewCluster(cfg Config, opts ...Option) (*Cluster, error) {
 	}
 	for _, opt := range opts {
 		opt(c)
+	}
+
+	if c.logWriter != nil {
+		c.logWriter = &syncWriter{w: c.logWriter}
 	}
 
 	c.logger = logging.New(c.logWriter, cfg.LogLevel)

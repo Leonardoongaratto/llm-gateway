@@ -109,8 +109,7 @@ func TestCluster_LifecycleAndEndpoints_AC1F04(t *testing.T) {
 		TempDir:          filepath.Join(tempDir, "data"),
 	}
 
-	var logBuf bytes.Buffer
-	cluster, err := NewCluster(cfg, WithLogWriter(&logBuf))
+	cluster, err := NewCluster(cfg, WithLogWriter(io.Discard))
 	if err != nil {
 		t.Fatalf("failed to create cluster: %v", err)
 	}
