@@ -40,6 +40,7 @@ import (
 
 type Config struct {
 	ServiceName      string `env:"SERVICE_NAME" default:"gateway"`
+	Host             string `env:"HOST" default:""`
 	HTTPPort         int    `env:"HTTP_PORT" default:"8788"`
 	LogLevel         string `env:"LOG_LEVEL" default:"info"`
 	OTelEndpoint     string `env:"OTEL_ENDPOINT" default:""`
@@ -324,12 +325,15 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 	apiHandler := api.NewHandler(svc, activeAuthMgr)
 	apiHandler.RegisterRoutes(mux)
 
-	return startHTTPServer(ctx, cfg.HTTPPort, mux, logger)
+	return startHTTPServer(ctx, cfg.Host, cfg.HTTPPort, otel.HTTPHandler(mux, "gateway"), logger)
 }
 
-func startHTTPServer(ctx context.Context, port int, handler http.Handler, logger *slog.Logger) error {
+func startHTTPServer(ctx context.Context, host string, port int, handler http.Handler, logger *slog.Logger) error {
+	if host == "" {
+		host = "127.0.0.1"
+	}
 	server := &http.Server{
-		Addr:              fmt.Sprintf("127.0.0.1:%d", port),
+		Addr:              fmt.Sprintf("%s:%d", host, port),
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}

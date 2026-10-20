@@ -15,16 +15,19 @@ import (
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/health"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/logging"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"google.golang.org/grpc"
 )
 
 // Config defines common service server configuration.
 type Config struct {
-	ServiceName  string
-	HTTPPort     int
-	GRPCPort     int
-	LogLevel     string
-	OTelEndpoint string
+	ServiceName   string
+	Host          string
+	HTTPPort      int
+	GRPCPort      int
+	LogLevel      string
+	OTelEndpoint  string
+	SpanProcessor sdktrace.SpanProcessor
 }
 
 // Options allows configuring service runtime options.
@@ -39,7 +42,11 @@ func startGRPC(cfg Config, logger *slog.Logger, register func(*grpc.Server)) (*g
 	if cfg.GRPCPort <= 0 {
 		return nil, nil
 	}
-	grpcLis, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.GRPCPort))
+	host := cfg.Host
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	grpcLis, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, cfg.GRPCPort))
 	if err != nil {
 		return nil, fmt.Errorf("failed to bind grpc port: %w", err)
 	}
@@ -68,9 +75,13 @@ func buildHTTPMux(checker *health.Checker, otelProvider *otel.Provider, register
 }
 
 func startHTTP(cfg Config, logger *slog.Logger, mux *http.ServeMux) (*http.Server, <-chan error) {
+	host := cfg.Host
+	if host == "" {
+		host = "127.0.0.1"
+	}
 	httpServer := &http.Server{
-		Addr:              fmt.Sprintf("127.0.0.1:%d", cfg.HTTPPort),
-		Handler:           mux,
+		Addr:              fmt.Sprintf("%s:%d", host, cfg.HTTPPort),
+		Handler:           otel.HTTPHandler(mux, cfg.ServiceName),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -113,8 +124,9 @@ func Run(ctx context.Context, cfg Config, opts Options) error {
 	slog.SetDefault(logger)
 
 	otelProvider, err := otel.Init(ctx, otel.Config{
-		ServiceName:  cfg.ServiceName,
-		OTelEndpoint: cfg.OTelEndpoint,
+		ServiceName:   cfg.ServiceName,
+		OTelEndpoint:  cfg.OTelEndpoint,
+		SpanProcessor: cfg.SpanProcessor,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to init otel: %w", err)

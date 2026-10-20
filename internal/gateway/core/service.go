@@ -7,35 +7,20 @@ import (
 	"time"
 
 	eventsv1 "github.com/Leonardoongaratto/llm-gateway/gen/lgw/events/v1"
-	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/auth"
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/cache"
-	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/router"
 	"github.com/Leonardoongaratto/llm-gateway/internal/kernel/llm"
 	"github.com/Leonardoongaratto/llm-gateway/internal/kernel/money"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// BudgetClient abstracts the gRPC budget service client methods needed by the gateway.
-type BudgetClient interface {
-	Reserve(ctx context.Context, keyID string, maxMicros int64, requestID string) (reservationID string, remainingMicros int64, err error)
-	SettleAsync(reservationID string, actualMicros int64)
-	Release(ctx context.Context, reservationID string) error
-}
-
-// EventPublisher abstracts the asynchronous NATS JetStream event publisher for the gateway.
-type EventPublisher interface {
-	PublishUsage(ctx context.Context, evt *eventsv1.UsageRecorded)
-	PublishFallback(ctx context.Context, evt *eventsv1.ProviderFallback)
-}
-
 // ServiceConfig holds the dependencies required to instantiate core.Service.
 type ServiceConfig struct {
-	AuthManager    *auth.Manager
+	AuthManager    AuthManager
 	BudgetClient   BudgetClient
 	EventPublisher EventPublisher
 	LocalCache     *cache.Cache
-	Router         *router.Router
+	Router         Router
 	Logger         *slog.Logger
 }
 
@@ -61,11 +46,11 @@ type StreamResult struct {
 
 // Service is the central orchestrator for authentication, budget reservations, caching, routing, and event recording.
 type Service struct {
-	authMgr        *auth.Manager
+	authMgr        AuthManager
 	budgetClient   BudgetClient
 	eventPublisher EventPublisher
 	localCache     *cache.Cache
-	router         *router.Router
+	router         Router
 	logger         *slog.Logger
 }
 
@@ -86,7 +71,7 @@ func NewService(cfg ServiceConfig) *Service {
 	}
 }
 
-func (s *Service) prepareRequest(rawKey string, req *llm.Request) (*auth.KeyInfo, error) {
+func (s *Service) prepareRequest(rawKey string, req *llm.Request) (*KeyInfo, error) {
 	keyInfo, err := s.authMgr.Authenticate(rawKey)
 	if err != nil {
 		return nil, err
@@ -95,9 +80,7 @@ func (s *Service) prepareRequest(rawKey string, req *llm.Request) (*auth.KeyInfo
 		return nil, err
 	}
 	req.KeyID = keyInfo.ID
-	if req.ID == "" {
-		req.ID = "req-" + uuid.New().String()
-	}
+	req.ID = "req-" + uuid.New().String()
 	return keyInfo, nil
 }
 
@@ -120,7 +103,7 @@ func (s *Service) checkCache(ctx context.Context, keyID string, req *llm.Request
 	}, cacheKey, true
 }
 
-func (s *Service) estimateAndReserve(ctx context.Context, snap *auth.Snapshot, keyID string, req *llm.Request) (*auth.PricingInfo, money.Micros, string, int64, error) {
+func (s *Service) estimateAndReserve(ctx context.Context, snap Snapshot, keyID string, req *llm.Request) (*PricingInfo, money.Micros, string, int64, error) {
 	chain := snap.ResolveChain(req.Model)
 	targetModel := req.Model
 	if len(chain) > 0 {
@@ -215,7 +198,7 @@ func (s *Service) ChatCompletion(ctx context.Context, rawKey string, req *llm.Re
 	}
 
 	if reservationID != "" && s.budgetClient != nil {
-		s.budgetClient.SettleAsync(reservationID, int64(actualCost))
+		s.budgetClient.SettleAsync(ctx, reservationID, int64(actualCost))
 	}
 
 	if s.localCache != nil && cache.IsEligible(temperature, req.Stream) {
@@ -236,7 +219,7 @@ func (s *Service) ChatCompletion(ctx context.Context, rawKey string, req *llm.Re
 	}, nil
 }
 
-func (s *Service) finalizeStream(reqID, keyID, modelReq, reservationID string, initialPricing *auth.PricingInfo, maxCost money.Micros, startTime time.Time, snap *auth.Snapshot, streamExec *router.StreamExecutionResult, finalUsage *llm.Usage) {
+func (s *Service) finalizeStream(ctx context.Context, reqID, keyID, modelReq, reservationID string, initialPricing *PricingInfo, maxCost money.Micros, startTime time.Time, snap Snapshot, streamExec *StreamExecutionResult, finalUsage *llm.Usage) {
 	latencyMs := time.Since(startTime).Milliseconds()
 	if finalUsage != nil {
 		actualPricing := snap.FindPricing(streamExec.ModelUsed, streamExec.ProviderUsed)
@@ -248,14 +231,14 @@ func (s *Service) finalizeStream(reqID, keyID, modelReq, reservationID string, i
 			actualCost = maxCost
 		}
 		if reservationID != "" && s.budgetClient != nil {
-			s.budgetClient.SettleAsync(reservationID, int64(actualCost))
+			s.budgetClient.SettleAsync(ctx, reservationID, int64(actualCost))
 		}
-		s.publishUsage(context.Background(), reqID, keyID, modelReq, streamExec.ModelUsed, streamExec.ProviderUsed, streamExec.FallbackFrom, *finalUsage, int64(actualCost), latencyMs, false)
+		s.publishUsage(ctx, reqID, keyID, modelReq, streamExec.ModelUsed, streamExec.ProviderUsed, streamExec.FallbackFrom, *finalUsage, int64(actualCost), latencyMs, false)
 		return
 	}
 
 	if reservationID != "" && s.budgetClient != nil {
-		_ = s.budgetClient.Release(context.Background(), reservationID)
+		_ = s.budgetClient.Release(context.WithoutCancel(ctx), reservationID)
 	}
 }
 
@@ -319,10 +302,10 @@ func forwardStream(ctx context.Context, in <-chan llm.Chunk, out chan<- llm.Chun
 	}
 }
 
-func (s *Service) pipeStream(ctx context.Context, reqID, keyID, modelReq string, reservationID string, initialPricing *auth.PricingInfo, maxCost money.Micros, startTime time.Time, snap *auth.Snapshot, streamExec *router.StreamExecutionResult, outChan chan<- llm.Chunk) {
+func (s *Service) pipeStream(ctx context.Context, reqID, keyID, modelReq string, reservationID string, initialPricing *PricingInfo, maxCost money.Micros, startTime time.Time, snap Snapshot, streamExec *StreamExecutionResult, outChan chan<- llm.Chunk) {
 	defer close(outChan)
 	finalUsage := forwardStream(ctx, streamExec.Stream, outChan)
-	s.finalizeStream(reqID, keyID, modelReq, reservationID, initialPricing, maxCost, startTime, snap, streamExec, finalUsage)
+	s.finalizeStream(ctx, reqID, keyID, modelReq, reservationID, initialPricing, maxCost, startTime, snap, streamExec, finalUsage)
 }
 
 // ChatCompletionStream handles a streaming chat completion request through the gateway pipeline.

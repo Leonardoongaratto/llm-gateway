@@ -15,6 +15,7 @@ import (
 	"github.com/Leonardoongaratto/llm-gateway/internal/usage/store"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
@@ -122,6 +123,10 @@ func (c *Consumer) Dispatch(ctx context.Context, msg jetstream.Msg) error {
 }
 
 func (c *Consumer) handleUsageRecorded(ctx context.Context, msg jetstream.Msg) error {
+	tr := otel.Tracer("usage")
+	ctx, span := tr.Start(ctx, "usage.consume_event")
+	defer span.End()
+
 	var evt eventsv1.UsageRecorded
 	if err := unmarshalEvent(msg.Data(), &evt); err != nil {
 		c.logger.Error("failed to unmarshal usage recorded event", slog.Any("error", err))

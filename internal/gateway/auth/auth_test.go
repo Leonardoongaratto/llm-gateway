@@ -133,8 +133,8 @@ func TestSnapshot_AtomicSwap(t *testing.T) {
 	runConcurrentUpdater(ctx, &wg, mgr)
 
 	wg.Wait()
-	if mgr.GetSnapshot().Version < 2 {
-		t.Fatalf("expected version >= 2, got %d", mgr.GetSnapshot().Version)
+	if mgr.Snapshot().Version < 2 {
+		t.Fatalf("expected version >= 2, got %d", mgr.Snapshot().Version)
 	}
 }
 
@@ -241,7 +241,7 @@ func TestManager_LoadSnapshot(t *testing.T) {
 		t.Fatalf("LoadSnapshot failed: %v", err)
 	}
 
-	snap := mgr.GetSnapshot()
+	snap := mgr.Snapshot()
 	if snap == nil || snap.Version != 42 {
 		t.Fatalf("unexpected snapshot version: %+v", snap)
 	}

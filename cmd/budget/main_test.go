@@ -8,12 +8,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	budgetv1 "github.com/Leonardoongaratto/llm-gateway/gen/lgw/budget/v1"
 	"github.com/Leonardoongaratto/llm-gateway/internal/budget/core"
+	budgethttp "github.com/Leonardoongaratto/llm-gateway/internal/budget/httpapi"
 	"github.com/Leonardoongaratto/llm-gateway/internal/budget/store"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/config"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/grpcx"
@@ -305,10 +307,13 @@ func TestBudget_RunWithNATS(t *testing.T) {
 }
 
 func TestBudget_CheckAdminAuth_EmptyTokenFailsClosed(t *testing.T) {
+	handler := budgethttp.NewHandler(nil, budgethttp.Config{AdminToken: ""})
 	req, _ := http.NewRequest(http.MethodPost, "http://localhost/admin/limits", nil)
 	req.Header.Set("Authorization", "Bearer something")
-	if checkAdminAuth(req, "") {
-		t.Fatal("expected checkAdminAuth to return false when adminToken is empty")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 unauthorized when adminToken is empty, got %d", rec.Code)
 	}
 }
 

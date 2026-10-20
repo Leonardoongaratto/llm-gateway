@@ -157,3 +157,25 @@ jobs:
         env:
           LGW_TEST_PG_DSN: "postgres://postgres:postgres@localhost:5432/llm_gateway_test?sslmode=disable"
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/coverage.ps1 -Race -Threshold 80
+
+  compose:
+    name: Docker Compose Integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create .env from example
+        run: cp deploy/.env.example deploy/.env
+
+      - name: Build and Start Compose Stack
+        run: docker compose -f deploy/compose.yaml up --build -d --wait
+
+      - name: Verify Aggregated Health via Edge
+        run: |
+          curl -f -s http://localhost:8787/health | grep '"status":"ok"'
+
+      - name: Shutdown Compose Stack
+        if: always()
+        run: docker compose -f deploy/compose.yaml down -v
+

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -18,8 +19,9 @@ import (
 )
 
 type Config struct {
-	ServiceName  string
-	OTelEndpoint string
+	ServiceName   string
+	OTelEndpoint  string
+	SpanProcessor sdktrace.SpanProcessor
 }
 
 type Provider struct {
@@ -44,22 +46,29 @@ func Init(ctx context.Context, cfg Config) (*Provider, error) {
 		return nil, err
 	}
 
-	var tracerProvider *sdktrace.TracerProvider
+	tpOpts := []sdktrace.TracerProviderOption{
+		sdktrace.WithResource(res),
+	}
+	if cfg.SpanProcessor != nil {
+		tpOpts = append(tpOpts, sdktrace.WithSpanProcessor(cfg.SpanProcessor))
+	}
+
 	if cfg.OTelEndpoint != "" {
+		endpointOpt := otlptracehttp.WithEndpoint(cfg.OTelEndpoint)
+		if strings.HasPrefix(cfg.OTelEndpoint, "http://") || strings.HasPrefix(cfg.OTelEndpoint, "https://") {
+			endpointOpt = otlptracehttp.WithEndpointURL(cfg.OTelEndpoint)
+		}
 		exp, err := otlptracehttp.New(ctx,
-			otlptracehttp.WithEndpoint(cfg.OTelEndpoint),
+			endpointOpt,
 			otlptracehttp.WithInsecure(),
 		)
 		if err != nil {
 			return nil, err
 		}
-		tracerProvider = sdktrace.NewTracerProvider(
-			sdktrace.WithBatcher(exp),
-			sdktrace.WithResource(res),
-		)
-	} else {
-		tracerProvider = sdktrace.NewTracerProvider(sdktrace.WithResource(res))
+		tpOpts = append(tpOpts, sdktrace.WithBatcher(exp))
 	}
+
+	tracerProvider := sdktrace.NewTracerProvider(tpOpts...)
 	otel.SetTracerProvider(tracerProvider)
 
 	promExporter, err := prometheus.New()

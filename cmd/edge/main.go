@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Leonardoongaratto/llm-gateway/internal/edge/proxy"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/config"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/health"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/logging"
@@ -20,9 +21,16 @@ import (
 
 type Config struct {
 	ServiceName  string `env:"SERVICE_NAME" default:"edge"`
+	Host         string `env:"HOST" default:""`
 	HTTPPort     int    `env:"HTTP_PORT" default:"8787"`
 	LogLevel     string `env:"LOG_LEVEL" default:"info"`
 	OTelEndpoint string `env:"OTEL_ENDPOINT" default:""`
+	GatewayURL   string `env:"GATEWAY_URL" default:"http://127.0.0.1:8788"`
+	ControlURL   string `env:"CONTROL_URL" default:"http://127.0.0.1:8790"`
+	UsageURL     string `env:"USAGE_URL" default:"http://127.0.0.1:8791"`
+	BudgetURL    string `env:"BUDGET_URL" default:"http://127.0.0.1:8792"`
+	WebDir       string `env:"WEB_DIR" default:""`
+	MaxBodyBytes int64  `env:"MAX_BODY_BYTES" default:"10485760"`
 }
 
 type namedCheck struct {
@@ -58,6 +66,22 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 	logger := logging.New(options.logWriter, cfg.LogLevel)
 	slog.SetDefault(logger)
 
+	if cfg.GatewayURL == "" {
+		cfg.GatewayURL = "http://127.0.0.1:8788"
+	}
+	if cfg.ControlURL == "" {
+		cfg.ControlURL = "http://127.0.0.1:8790"
+	}
+	if cfg.UsageURL == "" {
+		cfg.UsageURL = "http://127.0.0.1:8791"
+	}
+	if cfg.BudgetURL == "" {
+		cfg.BudgetURL = "http://127.0.0.1:8792"
+	}
+	if cfg.MaxBodyBytes <= 0 {
+		cfg.MaxBodyBytes = 10485760
+	}
+
 	otelProvider, err := otel.Init(ctx, otel.Config{
 		ServiceName:  cfg.ServiceName,
 		OTelEndpoint: cfg.OTelEndpoint,
@@ -72,14 +96,31 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 		checker.RegisterCheck(ec.name, ec.check)
 	}
 
+	proxyHandler, err := proxy.New(proxy.Config{
+		GatewayURL:   cfg.GatewayURL,
+		ControlURL:   cfg.ControlURL,
+		UsageURL:     cfg.UsageURL,
+		BudgetURL:    cfg.BudgetURL,
+		WebDir:       cfg.WebDir,
+		MaxBodyBytes: cfg.MaxBodyBytes,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create edge proxy handler: %w", err)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/livez", checker.LivezHandler())
 	mux.HandleFunc("/readyz", checker.ReadyzHandler())
 	mux.Handle("/metrics", otelProvider.MetricsHandler())
+	mux.Handle("/", proxyHandler)
 
+	host := cfg.Host
+	if host == "" {
+		host = "127.0.0.1"
+	}
 	server := &http.Server{
-		Addr:              fmt.Sprintf("127.0.0.1:%d", cfg.HTTPPort),
-		Handler:           mux,
+		Addr:              fmt.Sprintf("%s:%d", host, cfg.HTTPPort),
+		Handler:           otel.HTTPHandler(mux, "edge"),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

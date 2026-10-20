@@ -210,7 +210,7 @@ func TestClient_SettleAsync_BackgroundRetry(t *testing.T) {
 		budgetclient.WithRetryBackoff(10*time.Millisecond),
 	)
 
-	client.SettleAsync("res-retry-1", 5000)
+	client.SettleAsync(context.Background(), "res-retry-1", 5000)
 
 	// Close cleanly waits for background worker to flush queue
 	if err := client.Close(); err != nil {

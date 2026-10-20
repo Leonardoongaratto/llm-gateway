@@ -2,27 +2,22 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"database/sql"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
 	budgetv1 "github.com/Leonardoongaratto/llm-gateway/gen/lgw/budget/v1"
-	"github.com/Leonardoongaratto/llm-gateway/internal/budget/core"
 	"github.com/Leonardoongaratto/llm-gateway/internal/budget/grpcapi"
+	budgethttp "github.com/Leonardoongaratto/llm-gateway/internal/budget/httpapi"
 	"github.com/Leonardoongaratto/llm-gateway/internal/budget/outbox"
 	"github.com/Leonardoongaratto/llm-gateway/internal/budget/store"
 	"github.com/Leonardoongaratto/llm-gateway/internal/budget/sweeper"
-	"github.com/Leonardoongaratto/llm-gateway/internal/kernel/money"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/config"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/health"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/logging"
@@ -35,6 +30,7 @@ import (
 
 type Config struct {
 	ServiceName    string `env:"SERVICE_NAME" default:"budget"`
+	Host           string `env:"HOST" default:""`
 	HTTPPort       int    `env:"HTTP_PORT" default:"8792"`
 	GRPCPort       int    `env:"GRPC_PORT" default:"9101"`
 	LogLevel       string `env:"LOG_LEVEL" default:"info"`
@@ -171,6 +167,7 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 
 	srvCfg := service.Config{
 		ServiceName:  cfg.ServiceName,
+		Host:         cfg.Host,
 		HTTPPort:     cfg.HTTPPort,
 		GRPCPort:     cfg.GRPCPort,
 		LogLevel:     cfg.LogLevel,
@@ -184,7 +181,9 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 			budgetv1.RegisterBudgetServiceServer(srv, grpcapi.New(budgetStore))
 		},
 		RegisterHTTP: func(mux *http.ServeMux) {
-			mux.HandleFunc("POST /admin/limits", handleAdminLimits(budgetStore, cfg.AdminToken))
+			adminHandler := budgethttp.NewHandler(budgetStore, budgethttp.Config{AdminToken: cfg.AdminToken})
+			mux.Handle("/admin/limits", adminHandler)
+			mux.Handle("/admin/limits/", adminHandler)
 		},
 	}
 
@@ -210,71 +209,4 @@ func realMain() int {
 
 func main() {
 	os.Exit(realMain())
-}
-
-type adminLimitsRequest struct {
-	KeyID              string `json:"key_id"`
-	DailyLimitMicros   int64  `json:"daily_limit_micros"`
-	MonthlyLimitMicros int64  `json:"monthly_limit_micros"`
-	RPM                int32  `json:"rpm"`
-}
-
-func checkAdminAuth(r *http.Request, adminToken string) bool {
-	if adminToken == "" {
-		return false
-	}
-	authHeader := r.Header.Get("Authorization")
-	parts := strings.SplitN(authHeader, " ", 2)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(parts[1]), []byte(adminToken)) == 1
-}
-
-func parseAdminLimitsRequest(w http.ResponseWriter, r *http.Request) (*adminLimitsRequest, error) {
-	body := http.MaxBytesReader(w, r.Body, 1<<20)
-	data, err := io.ReadAll(body)
-	if err != nil {
-		return nil, errors.New("invalid request body")
-	}
-
-	var req adminLimitsRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		return nil, errors.New("invalid request json")
-	}
-	if req.KeyID == "" {
-		return nil, errors.New("missing key_id")
-	}
-	if req.DailyLimitMicros < 0 || req.MonthlyLimitMicros < 0 || req.RPM < 0 {
-		return nil, errors.New("limits must be non-negative")
-	}
-	return &req, nil
-}
-
-func handleAdminLimits(budgetStore *store.Store, adminToken string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !checkAdminAuth(r, adminToken) {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
-
-		req, err := parseAdminLimitsRequest(w, r)
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
-			return
-		}
-
-		if err := budgetStore.SetKeyLimits(r.Context(), core.KeyLimits{
-			KeyID:              req.KeyID,
-			DailyLimitMicros:   money.Micros(req.DailyLimitMicros),
-			MonthlyLimitMicros: money.Micros(req.MonthlyLimitMicros),
-			RPM:                req.RPM,
-		}); err != nil {
-			http.Error(w, `{"error":"failed to set limits"}`, http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	}
 }
