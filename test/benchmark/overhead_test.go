@@ -180,17 +180,25 @@ func TestBenchmark_Overhead(t *testing.T) {
 	p99 := calculatePercentile(durations, 99.0)
 	p999 := calculatePercentile(durations, 99.9)
 
+	targetP50 := 5 * time.Millisecond
+	targetP99 := 20 * time.Millisecond
+	if raceDetectorEnabled {
+		targetP50 = 15 * time.Millisecond
+		targetP99 = 40 * time.Millisecond
+		t.Logf("Running under race detector: adjusted targets (p50 <= %v, p99 <= %v)", targetP50, targetP99)
+	}
+
 	t.Logf("Overhead Benchmark Results (N=%d):", totalRequests)
-	t.Logf("  p50 : %v (target <= 5ms)", p50)
+	t.Logf("  p50 : %v (target <= %v)", p50, targetP50)
 	t.Logf("  p90 : %v", p90)
-	t.Logf("  p99 : %v (target <= 20ms)", p99)
+	t.Logf("  p99 : %v (target <= %v)", p99, targetP99)
 	t.Logf("  p999: %v", p999)
 
 	// AC-1F-11 / AC-39 assertions
-	if p50 > 5*time.Millisecond {
-		t.Errorf("expected p50 <= 5ms, got %v", p50)
+	if p50 > targetP50 {
+		t.Errorf("expected p50 <= %v, got %v", targetP50, p50)
 	}
-	if p99 > 20*time.Millisecond {
-		t.Errorf("expected p99 <= 20ms, got %v", p99)
+	if p99 > targetP99 {
+		t.Errorf("expected p99 <= %v, got %v", targetP99, p99)
 	}
 }
