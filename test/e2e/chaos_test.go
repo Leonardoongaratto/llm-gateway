@@ -93,10 +93,13 @@ func TestChaos_AC1F08_AC32_SweeperRestoresBalance(t *testing.T) {
 
 	keyID := "key-sweep-chaos"
 	vk := controlcore.VirtualKey{
-		ID:        keyID,
-		Name:      "Chaos Sweeper Key",
-		KeyHash:   keyHash,
-		CreatedAt: time.Now(),
+		ID:                 keyID,
+		Name:               "Chaos Sweeper Key",
+		KeyHash:            keyHash,
+		DailyLimitMicros:   200,
+		MonthlyLimitMicros: 200,
+		RPM:                1000,
+		CreatedAt:          time.Now(),
 	}
 	if _, err := cluster.ControlStore().CreateKey(ctx, vk); err != nil {
 		t.Fatalf("failed to create key: %v", err)

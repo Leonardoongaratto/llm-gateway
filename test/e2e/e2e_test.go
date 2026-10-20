@@ -244,10 +244,13 @@ func TestE2E_BudgetExceeded_HTTP402(t *testing.T) {
 	}
 
 	vk := controlcore.VirtualKey{
-		ID:        "key-broke-e2e",
-		Name:      "Broke Test Key",
-		KeyHash:   keyHash,
-		CreatedAt: time.Now(),
+		ID:                 "key-broke-e2e",
+		Name:               "Broke Test Key",
+		KeyHash:            keyHash,
+		DailyLimitMicros:   1,
+		MonthlyLimitMicros: 1,
+		RPM:                1000,
+		CreatedAt:          time.Now(),
 	}
 	if _, err := cluster.ControlStore().CreateKey(ctx, vk); err != nil {
 		t.Fatalf("failed to create key: %v", err)
@@ -444,11 +447,15 @@ func TestE2E_AC1F05_AC05_ConcurrentBudgetEnforcement(t *testing.T) {
 	}
 
 	keyID := "key-budget-ac05"
+	costPerCall := int64(200)
 	vk := controlcore.VirtualKey{
-		ID:        keyID,
-		Name:      "AC-05 Concurrent Budget Key",
-		KeyHash:   keyHash,
-		CreatedAt: time.Now(),
+		ID:                 keyID,
+		Name:               "AC-05 Concurrent Budget Key",
+		KeyHash:            keyHash,
+		DailyLimitMicros:   money.Micros(10 * costPerCall),
+		MonthlyLimitMicros: money.Micros(10 * costPerCall),
+		RPM:                1000,
+		CreatedAt:          time.Now(),
 	}
 	if _, err := cluster.ControlStore().CreateKey(ctx, vk); err != nil {
 		t.Fatalf("failed to create key: %v", err)
@@ -459,7 +466,6 @@ func TestE2E_AC1F05_AC05_ConcurrentBudgetEnforcement(t *testing.T) {
 	// Completion (max_tokens=10): 10 completion tokens * 15 micros = 150 micros
 	// Total estimated max cost = 200 micros. Fake provider also returns 10+10 tokens = 200 micros.
 	// Budget for exactly 10 calls: 10 * 200 = 2000 micros.
-	costPerCall := int64(200)
 	limits := budgetcore.KeyLimits{
 		KeyID:              keyID,
 		DailyLimitMicros:   money.Micros(10 * costPerCall),
@@ -574,10 +580,13 @@ func TestE2E_AC1F06_AC13_SharedRateLimiting(t *testing.T) {
 
 	keyID := "key-rate-ac13"
 	vk := controlcore.VirtualKey{
-		ID:        keyID,
-		Name:      "AC-13 Rate Limited Key",
-		KeyHash:   keyHash,
-		CreatedAt: time.Now(),
+		ID:                 keyID,
+		Name:               "AC-13 Rate Limited Key",
+		KeyHash:            keyHash,
+		DailyLimitMicros:   1000000000,
+		MonthlyLimitMicros: 5000000000,
+		RPM:                5,
+		CreatedAt:          time.Now(),
 	}
 	if _, err := cluster.ControlStore().CreateKey(ctx, vk); err != nil {
 		t.Fatalf("failed to create key: %v", err)
