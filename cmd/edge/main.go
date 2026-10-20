@@ -21,6 +21,7 @@ import (
 
 type Config struct {
 	ServiceName  string `env:"SERVICE_NAME" default:"edge"`
+	Host         string `env:"HOST" default:""`
 	HTTPPort     int    `env:"HTTP_PORT" default:"8787"`
 	LogLevel     string `env:"LOG_LEVEL" default:"info"`
 	OTelEndpoint string `env:"OTEL_ENDPOINT" default:""`
@@ -113,8 +114,12 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 	mux.Handle("/metrics", otelProvider.MetricsHandler())
 	mux.Handle("/", proxyHandler)
 
+	host := cfg.Host
+	if host == "" {
+		host = "127.0.0.1"
+	}
 	server := &http.Server{
-		Addr:              fmt.Sprintf("127.0.0.1:%d", cfg.HTTPPort),
+		Addr:              fmt.Sprintf("%s:%d", host, cfg.HTTPPort),
 		Handler:           otel.HTTPHandler(mux, "edge"),
 		ReadHeaderTimeout: 5 * time.Second,
 	}

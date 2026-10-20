@@ -35,6 +35,7 @@ func (e *RateLimitError) Is(target error) bool {
 }
 
 type settleTask struct {
+	ctx           context.Context
 	reservationID string
 	actualMicros  int64
 	attempts      int
@@ -199,10 +200,14 @@ func (c *Client) Settle(ctx context.Context, reservationID string, actualMicros 
 	return nil
 }
 
-// SettleAsync enqueues Settle execution in the background with automatic retries.
-func (c *Client) SettleAsync(reservationID string, actualMicros int64) {
+// SettleAsync enqueues Settle execution in the background with automatic retries, propagating trace context.
+func (c *Client) SettleAsync(ctx context.Context, reservationID string, actualMicros int64) {
+	taskCtx := context.Background()
+	if ctx != nil {
+		taskCtx = context.WithoutCancel(ctx)
+	}
 	select {
-	case c.queue <- settleTask{reservationID: reservationID, actualMicros: actualMicros}:
+	case c.queue <- settleTask{ctx: taskCtx, reservationID: reservationID, actualMicros: actualMicros}:
 	default:
 		c.logger.Error("settle queue is full, dropping async settle",
 			slog.String("reservation_id", reservationID),
@@ -234,7 +239,11 @@ func isRetryable(code codes.Code) bool {
 }
 
 func (c *Client) executeSettleTask(task *settleTask) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	baseCtx := task.ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(baseCtx, c.timeout)
 	defer cancel()
 
 	_, err := c.grpcClient.Settle(ctx, &budgetv1.SettleRequest{

@@ -46,15 +46,16 @@ type Message struct {
 }
 
 type Request struct {
-	ID           string    `json:"id"`
-	KeyID        string    `json:"key_id"`
-	Model        string    `json:"model"`
-	Provider     string    `json:"provider,omitempty"`
-	Stream       bool      `json:"stream"`
-	Messages     []Message `json:"messages,omitempty"`
-	PromptTokens int64     `json:"prompt_tokens,omitempty"`
-	MaxTokens    int64     `json:"max_tokens,omitempty"`
-	Temperature  *float64  `json:"temperature,omitempty"`
+	ID              string    `json:"id"`
+	ClientRequestID string    `json:"client_request_id,omitempty"`
+	KeyID           string    `json:"key_id"`
+	Model           string    `json:"model"`
+	Provider        string    `json:"provider,omitempty"`
+	Stream          bool      `json:"stream"`
+	Messages        []Message `json:"messages,omitempty"`
+	PromptTokens    int64     `json:"prompt_tokens,omitempty"`
+	MaxTokens       int64     `json:"max_tokens,omitempty"`
+	Temperature     *float64  `json:"temperature,omitempty"`
 }
 
 type Response struct {

@@ -126,6 +126,22 @@ func (s *Store) DeleteKeyLimits(ctx context.Context, keyID string) error {
 	return err
 }
 
+// GetKeyLimits retrieves the current limits configuration for the specified keyID.
+func (s *Store) GetKeyLimits(ctx context.Context, keyID string) (*core.KeyLimits, error) {
+	if s.isSQLite {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	return s.queryKeyLimits(ctx, tx, keyID, false)
+}
+
 func (s *Store) queryKeyLimits(ctx context.Context, tx *sql.Tx, keyID string, forUpdate bool) (*core.KeyLimits, error) {
 	query := `SELECT daily_limit_micros, monthly_limit_micros, rpm FROM key_limits WHERE key_id = $1`
 	if !s.isSQLite && forUpdate {

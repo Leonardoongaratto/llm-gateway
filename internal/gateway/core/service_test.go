@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,8 +19,15 @@ import (
 	"github.com/Leonardoongaratto/llm-gateway/internal/kernel/money"
 )
 
+type reserveRecord struct {
+	keyID     string
+	maxMicros int64
+	reqID     string
+}
+
 type mockBudgetClient struct {
 	reserveFunc  func(ctx context.Context, keyID string, maxMicros int64, requestID string) (string, int64, error)
+	reserveCalls []reserveRecord
 	settleCalls  []settleRecord
 	releaseCalls []string
 }
@@ -30,13 +38,14 @@ type settleRecord struct {
 }
 
 func (m *mockBudgetClient) Reserve(ctx context.Context, keyID string, maxMicros int64, requestID string) (string, int64, error) {
+	m.reserveCalls = append(m.reserveCalls, reserveRecord{keyID: keyID, maxMicros: maxMicros, reqID: requestID})
 	if m.reserveFunc != nil {
 		return m.reserveFunc(ctx, keyID, maxMicros, requestID)
 	}
 	return "res-default", 1_000_000, nil
 }
 
-func (m *mockBudgetClient) SettleAsync(reservationID string, actualMicros int64) {
+func (m *mockBudgetClient) SettleAsync(_ context.Context, reservationID string, actualMicros int64) {
 	m.settleCalls = append(m.settleCalls, settleRecord{reservationID: reservationID, actualMicros: actualMicros})
 }
 
@@ -395,7 +404,7 @@ func TestService_PricingNotFound(t *testing.T) {
 
 	// Add key allowed for model without pricing
 	keyHash := hashKey("lgw_9999999999abcdef9999999999abcdef", testPepper)
-	snap := authMgr.GetSnapshot()
+	snap := authMgr.Snapshot()
 	snap.KeysByHash[keyHash] = &auth.KeyInfo{
 		ID:            "key-nopricing",
 		KeyHash:       keyHash,
@@ -415,5 +424,39 @@ func TestService_PricingNotFound(t *testing.T) {
 	_, err = svc.ChatCompletionStream(context.Background(), "lgw_9999999999abcdef9999999999abcdef", req)
 	if err == nil {
 		t.Fatal("expected error for missing pricing in stream, got nil")
+	}
+}
+
+func TestService_PrepareRequest_AlwaysGeneratesNewID_IgnoresClientProvidedID(t *testing.T) {
+	svc, mockBudget, _, _, _ := setupServiceTestEnv()
+
+	clientReq := &llm.Request{
+		ID:    "custom-client-request-id-12345",
+		Model: "claude-3-5-sonnet",
+	}
+
+	res, err := svc.ChatCompletion(context.Background(), testRawKey, clientReq, 0.7)
+	if err != nil {
+		t.Fatalf("unexpected completion error: %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected non-nil response")
+	}
+
+	if clientReq.ID == "custom-client-request-id-12345" {
+		t.Errorf("expected client request ID to be overridden by server, but kept: %s", clientReq.ID)
+	}
+	if !strings.HasPrefix(clientReq.ID, "req-") {
+		t.Errorf("expected generated request ID to have prefix req-, got: %s", clientReq.ID)
+	}
+
+	if len(mockBudget.reserveCalls) != 1 {
+		t.Fatalf("expected 1 reserve call, got %d", len(mockBudget.reserveCalls))
+	}
+	if mockBudget.reserveCalls[0].reqID == "custom-client-request-id-12345" {
+		t.Errorf("expected budget reserve to receive server-generated ID, got client ID")
+	}
+	if !strings.HasPrefix(mockBudget.reserveCalls[0].reqID, "req-") {
+		t.Errorf("expected budget reserve ID to have prefix req-, got: %s", mockBudget.reserveCalls[0].reqID)
 	}
 }

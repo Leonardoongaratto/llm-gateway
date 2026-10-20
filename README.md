@@ -57,7 +57,7 @@ flowchart TD
 
 | Service | HTTP Port | gRPC Port | Primary Responsibility |
 | :--- | :--- | :--- | :--- |
-| **`edge`** | `8787` | — | Reverse proxy, request ID injection, rate limit aggregation, routing, SPA static asset server. |
+| **`edge`** | `8787` | — | Reverse proxy, request ID injection, aggregated health checks, routing, SPA static asset server. |
 | **`gateway`** | `8788` | — | Core LLM routing, cache, budget reservation client, provider adapters, event publishing. |
 | **`budget`** | `8792` | `9101` | Atomic budget reservations, distributed rate limiting, and balance settlement. |
 | **`control`** | `8790` | `9102` | Virtual key management, model pricing configuration, snapshot distribution. |
@@ -93,6 +93,12 @@ curl -i http://127.0.0.1:8787/health
 To run the complete production-grade stack including PostgreSQL 16, NATS JetStream, Prometheus, and Jaeger:
 
 ```bash
+# 1. Create environment configuration from template
+cp deploy/.env.example deploy/.env
+
+# Note: In non-dev environments, replace dev defaults with strong secrets for LGW_ADMIN_TOKEN, LGW_KEY_PEPPER, and LGW_POSTGRES_PASSWORD.
+
+# 2. Start containerized stack
 docker compose -f deploy/compose.yaml up -d
 ```
 
@@ -246,6 +252,8 @@ curl -X POST http://localhost:8787/v1/messages \
    - If the `usage` service is temporarily down, messages accumulate safely in JetStream streams and are processed immediately upon recovery without event loss.
 6. **W3C Distributed Tracing Across Sync & Async Boundaries**:
    - Injected W3C `traceparent` headers are propagated from Edge -> Gateway -> Upstream -> JetStream -> Usage Consumer, providing end-to-end trace visibility in Jaeger.
+7. **OTLP/HTTP Telemetry Export**:
+   - OpenTelemetry trace export uses standard OTLP/HTTP (`otlptracehttp`) over port 4318, providing universal firewall, container, and cloud proxy compatibility without requiring HTTP/2 gRPC ALPN negotiation.
 
 ---
 

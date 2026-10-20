@@ -39,8 +39,8 @@ func (m *mockBudgetClient) Reserve(ctx context.Context, keyID string, maxMicros 
 	return "res-api-1", 5_000_000, nil
 }
 
-func (m *mockBudgetClient) SettleAsync(_ string, _ int64)             {}
-func (m *mockBudgetClient) Release(_ context.Context, _ string) error { return nil }
+func (m *mockBudgetClient) SettleAsync(_ context.Context, _ string, _ int64) {}
+func (m *mockBudgetClient) Release(_ context.Context, _ string) error        { return nil }
 
 type mockEventPublisher struct{}
 

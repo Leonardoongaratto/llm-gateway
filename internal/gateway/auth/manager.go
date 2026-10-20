@@ -13,6 +13,7 @@ import (
 
 	"github.com/Leonardoongaratto/llm-gateway/gen/lgw/control/v1"
 	"github.com/Leonardoongaratto/llm-gateway/gen/lgw/events/v1"
+	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/core"
 	"github.com/Leonardoongaratto/llm-gateway/internal/kernel/llm"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/natsx"
 	"github.com/nats-io/nats.go/jetstream"
@@ -111,8 +112,13 @@ func (m *Manager) IsLoaded() bool {
 	return m.loaded.Load()
 }
 
-// GetSnapshot returns the current in-memory snapshot.
-func (m *Manager) GetSnapshot() *Snapshot {
+// GetSnapshot returns the current in-memory snapshot as core.Snapshot.
+func (m *Manager) GetSnapshot() core.Snapshot {
+	return m.snap.Load()
+}
+
+// Snapshot returns the concrete in-memory snapshot.
+func (m *Manager) Snapshot() *Snapshot {
 	return m.snap.Load()
 }
 

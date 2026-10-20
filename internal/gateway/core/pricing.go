@@ -3,7 +3,6 @@ package core
 import (
 	"errors"
 
-	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/auth"
 	"github.com/Leonardoongaratto/llm-gateway/internal/kernel/llm"
 	"github.com/Leonardoongaratto/llm-gateway/internal/kernel/money"
 )
@@ -33,7 +32,7 @@ func EstimatePromptTokens(messages []llm.Message) int64 {
 }
 
 // EstimateMaxCost estimates the maximum possible cost in micros for a request before calling the provider.
-func EstimateMaxCost(pricing *auth.PricingInfo, promptTokens int64, maxTokens int64) (money.Micros, error) {
+func EstimateMaxCost(pricing *PricingInfo, promptTokens int64, maxTokens int64) (money.Micros, error) {
 	if pricing == nil {
 		return 0, ErrPricingNotFound
 	}
@@ -59,7 +58,7 @@ func EstimateMaxCost(pricing *auth.PricingInfo, promptTokens int64, maxTokens in
 }
 
 // CalculateCost computes the exact cost in micros for a completed request based on measured token usage.
-func CalculateCost(pricing *auth.PricingInfo, usage llm.Usage) (money.Micros, error) {
+func CalculateCost(pricing *PricingInfo, usage llm.Usage) (money.Micros, error) {
 	if pricing == nil {
 		return 0, ErrPricingNotFound
 	}

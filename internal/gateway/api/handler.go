@@ -276,12 +276,12 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	llmReq := &llm.Request{
-		ID:          r.Header.Get("X-Request-Id"),
-		Model:       req.Model,
-		Messages:    req.Messages,
-		MaxTokens:   req.MaxTokens,
-		Stream:      req.Stream,
-		Temperature: req.Temperature,
+		ClientRequestID: r.Header.Get("X-Request-Id"),
+		Model:           req.Model,
+		Messages:        req.Messages,
+		MaxTokens:       req.MaxTokens,
+		Stream:          req.Stream,
+		Temperature:     req.Temperature,
 	}
 
 	if req.Stream {
@@ -485,12 +485,12 @@ func (h *Handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	llmReq := &llm.Request{
-		ID:          r.Header.Get("X-Request-Id"),
-		Model:       req.Model,
-		Messages:    req.Messages,
-		MaxTokens:   req.MaxTokens,
-		Stream:      req.Stream,
-		Temperature: req.Temperature,
+		ClientRequestID: r.Header.Get("X-Request-Id"),
+		Model:           req.Model,
+		Messages:        req.Messages,
+		MaxTokens:       req.MaxTokens,
+		Stream:          req.Stream,
+		Temperature:     req.Temperature,
 	}
 
 	if req.Stream {
@@ -702,7 +702,7 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	models := collectAllowedModels(h.authMgr.GetSnapshot(), keyInfo)
+	models := collectAllowedModels(h.authMgr.Snapshot(), keyInfo)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(modelListResponse{

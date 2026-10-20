@@ -21,6 +21,7 @@ import (
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/provider"
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/provider/fake"
 	"github.com/Leonardoongaratto/llm-gateway/internal/kernel/money"
+	usagestore "github.com/Leonardoongaratto/llm-gateway/internal/usage/store"
 )
 
 func getFreePort(t *testing.T) int {
@@ -505,14 +506,27 @@ func TestE2E_AC1F05_AC05_ConcurrentBudgetEnforcement(t *testing.T) {
 	t.Logf("AC-05 Results: Total=%d, Success(200)=%d, BudgetExceeded(402)=%d, Other=%d",
 		totalReqs, succ, exceeded, other)
 
-	if succ > 10 {
-		t.Fatalf("AC-05 violation: expected at most 10 successful requests, but got %d", succ)
+	if succ < 1 || succ > 10 {
+		t.Fatalf("AC-05 violation: expected between 1 and 10 successful requests, but got %d", succ)
 	}
 	if other != 0 {
 		t.Errorf("expected 0 unexpected errors, got %d", other)
 	}
 	if succ+exceeded != int64(totalReqs) {
 		t.Errorf("expected all requests to either succeed or exceed budget, got succ=%d, exceeded=%d", succ, exceeded)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	rem, err := cluster.BudgetStore().Remaining(ctx, keyID, time.Time{})
+	if err != nil {
+		t.Fatalf("failed to query remaining balance: %v", err)
+	}
+	expectedMaxSpent := 10 * costPerCall
+	if rem.DailySpentMicros > expectedMaxSpent {
+		t.Errorf("settled daily spent %d exceeded limit %d", rem.DailySpentMicros, expectedMaxSpent)
+	}
+	if rem.DailySpentMicros != succ*costPerCall {
+		t.Errorf("settled daily spent %d does not match successful calls %d * %d", rem.DailySpentMicros, succ, costPerCall)
 	}
 }
 
@@ -618,5 +632,131 @@ func assertRateLimited(t *testing.T, client *http.Client, url, key string) {
 	}
 	if retryAfter == "" {
 		t.Errorf("expected Retry-After header on 429 response, got empty")
+	}
+}
+
+func TestE2E_AdminLimits_EdgeProxyAndPersistence(t *testing.T) {
+	cluster, client := startTestCluster(t, nil)
+	edgeURL := cluster.EdgeURL()
+
+	// 1. Unauthenticated request to edge proxy /admin/limits returns 401
+	unauthReq, _ := http.NewRequest(http.MethodGet, edgeURL+"/admin/limits/test-key-limits", nil)
+	unauthResp, err := client.Do(unauthReq)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	unauthResp.Body.Close()
+	if unauthResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized, got %d", unauthResp.StatusCode)
+	}
+
+	// 2. Set limits via edge POST /admin/limits
+	body := []byte(`{"key_id":"test-key-limits","daily_limit_micros":150000,"monthly_limit_micros":500000,"rpm":120}`)
+	postReq, _ := http.NewRequest(http.MethodPost, edgeURL+"/admin/limits", bytes.NewReader(body))
+	postReq.Header.Set("Authorization", "Bearer dev-admin-token")
+	postReq.Header.Set("Content-Type", "application/json")
+	postResp, err := client.Do(postReq)
+	if err != nil {
+		t.Fatalf("post request failed: %v", err)
+	}
+	postResp.Body.Close()
+	if postResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", postResp.StatusCode)
+	}
+
+	// 3. Query limits via edge GET /admin/limits/{key_id}
+	getReq, _ := http.NewRequest(http.MethodGet, edgeURL+"/admin/limits/test-key-limits", nil)
+	getReq.Header.Set("Authorization", "Bearer dev-admin-token")
+	getResp, err := client.Do(getReq)
+	if err != nil {
+		t.Fatalf("get request failed: %v", err)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", getResp.StatusCode)
+	}
+	var limitsResp struct {
+		KeyID            string `json:"key_id"`
+		DailyLimitMicros int64  `json:"daily_limit_micros"`
+	}
+	if err := json.NewDecoder(getResp.Body).Decode(&limitsResp); err != nil {
+		t.Fatalf("failed to decode limits response: %v", err)
+	}
+	if limitsResp.KeyID != "test-key-limits" {
+		t.Errorf("expected key_id test-key-limits, got %v", limitsResp.KeyID)
+	}
+	if limitsResp.DailyLimitMicros != 150000 {
+		t.Errorf("expected daily 150000, got %v", limitsResp.DailyLimitMicros)
+	}
+
+	// 4. Update limits via edge PUT /admin/limits/{key_id}
+	putBody := []byte(`{"daily_limit_micros":300000,"monthly_limit_micros":900000,"rpm":200}`)
+	putReq, _ := http.NewRequest(http.MethodPut, edgeURL+"/admin/limits/test-key-limits", bytes.NewReader(putBody))
+	putReq.Header.Set("Authorization", "Bearer dev-admin-token")
+	putReq.Header.Set("Content-Type", "application/json")
+	putResp, err := client.Do(putReq)
+	if err != nil {
+		t.Fatalf("put request failed: %v", err)
+	}
+	putResp.Body.Close()
+	if putResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", putResp.StatusCode)
+	}
+
+	// 5. Directly verify persisted limits in BudgetStore
+	persisted, err := cluster.BudgetStore().GetKeyLimits(context.Background(), "test-key-limits")
+	if err != nil {
+		t.Fatalf("failed to get limits directly from BudgetStore: %v", err)
+	}
+	if persisted.DailyLimitMicros != money.Micros(300000) {
+		t.Errorf("expected persisted daily limit 300000, got %d", persisted.DailyLimitMicros)
+	}
+	if persisted.RPM != 200 {
+		t.Errorf("expected persisted rpm 200, got %d", persisted.RPM)
+	}
+}
+
+func TestE2E_DuplicateClientRequestID_AuditsBothRequests(t *testing.T) {
+	cluster, client := startTestCluster(t, nil)
+
+	dupHeader := "dup-client-req-test-123"
+	payload1 := `{"model":"gpt-4o","messages":[{"role":"user","content":"First prompt"}]}`
+	payload2 := `{"model":"gpt-4o","messages":[{"role":"user","content":"Second prompt"}]}`
+
+	for _, payload := range []string{payload1, payload2} {
+		req, err := http.NewRequest(http.MethodPost, cluster.EdgeURL()+"/v1/chat/completions", strings.NewReader(payload))
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer lgw_0123456789abcdef0123456789abcdef")
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Request-Id", dupHeader)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("do request: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	var records []usagestore.UsageRecord
+	for time.Now().Before(deadline) {
+		recs, total, err := cluster.UsageStore().QueryUsage(context.Background(), usagestore.UsageFilter{Limit: 10})
+		if err == nil && total >= 2 {
+			records = recs
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if len(records) < 2 {
+		t.Fatalf("expected at least 2 usage records despite duplicate client X-Request-Id, got %d", len(records))
+	}
+	if records[0].RequestID == records[1].RequestID {
+		t.Fatalf("expected distinct gateway RequestIDs, both got %s", records[0].RequestID)
 	}
 }

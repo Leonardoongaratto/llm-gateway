@@ -16,6 +16,7 @@ import (
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/provider"
 	"github.com/Leonardoongaratto/llm-gateway/internal/kernel/llm"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -53,24 +54,9 @@ func (p *traceCapturingProvider) TraceID() string {
 	return p.capturedTraceID
 }
 
-func TestE2E_AC1F10_AC37_Observability_TraceContextAndMetrics(t *testing.T) {
-	traceProv := &traceCapturingProvider{}
-
-	cluster, client := startTestCluster(t, func(c *devserver.Config) {
-		c.Providers = map[string]provider.Provider{
-			"openai": traceProv,
-		}
-	})
-
-	ctx := context.Background()
-
-	// 1. Subscribe to NATS JetStream events to verify trace propagation in asynchronous messages
-	js := cluster.JS()
-	var natsTraceparent string
-	var natsReceived sync.WaitGroup
-	natsReceived.Add(1)
-
-	consumer, err := js.CreateOrUpdateConsumer(ctx, "LGW_USAGE", jetstream.ConsumerConfig{
+func subscribeNATSUsageTrace(t *testing.T, js jetstream.JetStream) (<-chan string, func()) {
+	traceChan := make(chan string, 1)
+	consumer, err := js.CreateOrUpdateConsumer(context.Background(), "LGW_USAGE", jetstream.ConsumerConfig{
 		FilterSubject: "lgw.usage.recorded.v1",
 		DeliverPolicy: jetstream.DeliverNewPolicy,
 		AckPolicy:     jetstream.AckNonePolicy,
@@ -80,18 +66,85 @@ func TestE2E_AC1F10_AC37_Observability_TraceContextAndMetrics(t *testing.T) {
 	}
 
 	consumeCtx, err := consumer.Consume(func(msg jetstream.Msg) {
-		headers := msg.Headers()
-		if headers != nil {
-			natsTraceparent = headers.Get("Traceparent")
+		if headers := msg.Headers(); headers != nil {
+			traceChan <- headers.Get("Traceparent")
 		}
-		natsReceived.Done()
 	})
 	if err != nil {
 		t.Fatalf("failed to start consuming for trace test: %v", err)
 	}
-	defer consumeCtx.Stop()
+	return traceChan, consumeCtx.Stop
+}
 
-	// 2. Send request with known W3C traceparent
+func collectTraceSpans(recorder *tracetest.SpanRecorder, traceID string) map[string]bool {
+	spanNames := make(map[string]bool)
+	for _, s := range recorder.Ended() {
+		if s.SpanContext().TraceID().String() == traceID {
+			spanNames[s.Name()] = true
+		}
+	}
+	return spanNames
+}
+
+func hasAllSpans(spanNames map[string]bool, required []string) bool {
+	for _, reqSpan := range required {
+		if !spanNames[reqSpan] {
+			return false
+		}
+	}
+	return true
+}
+
+func verifySpans(t *testing.T, recorder *tracetest.SpanRecorder, knownTraceID string, requiredSpans []string) {
+	deadline := time.Now().Add(3 * time.Second)
+	var spanNames map[string]bool
+	for time.Now().Before(deadline) {
+		spanNames = collectTraceSpans(recorder, knownTraceID)
+		if hasAllSpans(spanNames, requiredSpans) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	for _, reqSpan := range requiredSpans {
+		if !spanNames[reqSpan] {
+			t.Errorf("expected span %q in trace %s, but got spans: %v", reqSpan, knownTraceID, spanNames)
+		}
+	}
+}
+
+func verifyMetricsEndpoints(t *testing.T, client *http.Client, cluster *devserver.Cluster) {
+	endpoints := []struct {
+		name string
+		url  string
+	}{
+		{"Edge", cluster.EdgeURL() + "/metrics"},
+		{"Gateway 1", cluster.Gateway1URL() + "/metrics"},
+		{"Gateway 2", cluster.Gateway2URL() + "/metrics"},
+		{"Control", cluster.ControlURL() + "/metrics"},
+		{"Usage", cluster.UsageURL() + "/metrics"},
+		{"Budget", cluster.BudgetURL() + "/metrics"},
+	}
+
+	for _, ep := range endpoints {
+		checkMetricsEndpoint(t, client, ep.name, ep.url)
+	}
+}
+
+func TestE2E_AC1F10_AC37_Observability_TraceContextAndMetrics(t *testing.T) {
+	traceProv := &traceCapturingProvider{}
+	spanRecorder := tracetest.NewSpanRecorder()
+
+	cluster, client := startTestCluster(t, func(c *devserver.Config) {
+		c.Providers = map[string]provider.Provider{
+			"openai": traceProv,
+		}
+		c.SpanProcessor = spanRecorder
+	})
+
+	traceChan, stopConsumer := subscribeNATSUsageTrace(t, cluster.JS())
+	defer stopConsumer()
+
 	knownTraceID := "4bf92f3577b34da6a3ce929d0e0e4736"
 	knownSpanID := "00f067aa0ba902b7"
 	testTraceparent := fmt.Sprintf("00-%s-%s-01", knownTraceID, knownSpanID)
@@ -102,7 +155,10 @@ func TestE2E_AC1F10_AC37_Observability_TraceContextAndMetrics(t *testing.T) {
 			{"role": "user", "content": "Trace and metrics test"},
 		},
 	}
-	bodyBytes, _ := json.Marshal(payload)
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("failed to marshal payload: %v", err)
+	}
 
 	req, err := http.NewRequest(http.MethodPost, cluster.EdgeURL()+"/v1/chat/completions", bytes.NewReader(bodyBytes))
 	if err != nil {
@@ -123,20 +179,12 @@ func TestE2E_AC1F10_AC37_Observability_TraceContextAndMetrics(t *testing.T) {
 		t.Fatalf("expected 200 OK, got %d: %s", resp.StatusCode, string(body))
 	}
 
-	// 3. Verify provider received traceparent context with same trace ID
 	if traceProv.TraceID() != knownTraceID {
 		t.Errorf("provider did not receive propagated trace ID: got %s, want %s", traceProv.TraceID(), knownTraceID)
 	}
 
-	// 4. Verify NATS received traceparent context with same trace ID
-	natsChan := make(chan struct{})
-	go func() {
-		natsReceived.Wait()
-		close(natsChan)
-	}()
-
 	select {
-	case <-natsChan:
+	case natsTraceparent := <-traceChan:
 		if !strings.Contains(natsTraceparent, knownTraceID) {
 			t.Errorf("NATS message header traceparent missing trace ID %s, got: %s", knownTraceID, natsTraceparent)
 		}
@@ -144,22 +192,16 @@ func TestE2E_AC1F10_AC37_Observability_TraceContextAndMetrics(t *testing.T) {
 		t.Error("timed out waiting for NATS usage event with propagated traceparent")
 	}
 
-	// 5. Verify Prometheus metrics endpoints on all services
-	endpoints := []struct {
-		name string
-		url  string
-	}{
-		{"Edge", cluster.EdgeURL() + "/metrics"},
-		{"Gateway 1", cluster.Gateway1URL() + "/metrics"},
-		{"Gateway 2", cluster.Gateway2URL() + "/metrics"},
-		{"Control", cluster.ControlURL() + "/metrics"},
-		{"Usage", cluster.UsageURL() + "/metrics"},
-		{"Budget", cluster.BudgetURL() + "/metrics"},
+	requiredSpans := []string{
+		"POST /",
+		"POST /v1/chat/completions",
+		"lgw.budget.v1.BudgetService/Reserve",
+		"lgw.budget.v1.BudgetService/Settle",
+		"usage.consume_event",
 	}
+	verifySpans(t, spanRecorder, knownTraceID, requiredSpans)
 
-	for _, ep := range endpoints {
-		checkMetricsEndpoint(t, client, ep.name, ep.url)
-	}
+	verifyMetricsEndpoints(t, client, cluster)
 }
 
 func checkMetricsEndpoint(t *testing.T, client *http.Client, name, url string) {

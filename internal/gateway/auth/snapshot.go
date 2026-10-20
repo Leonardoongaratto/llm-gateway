@@ -5,58 +5,14 @@ import (
 	"time"
 
 	"github.com/Leonardoongaratto/llm-gateway/gen/lgw/control/v1"
+	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/core"
 )
 
-// KeyInfo contains authenticated metadata for a virtual key.
-type KeyInfo struct {
-	ID                 string
-	Name               string
-	KeyHash            string
-	AllowedModels      []string
-	Active             bool
-	ExpiresAt          *time.Time
-	DailyLimitMicros   int64
-	MonthlyLimitMicros int64
-	RPM                int32
-}
+// KeyInfo is an alias to the core KeyInfo type.
+type KeyInfo = core.KeyInfo
 
-// IsExpired checks whether the key is expired at the given time.
-func (k *KeyInfo) IsExpired(now time.Time) bool {
-	if k == nil {
-		return true
-	}
-	if k.ExpiresAt == nil {
-		return false
-	}
-	return k.ExpiresAt.Before(now)
-}
-
-// IsModelAllowed checks if the given model is permitted for this key.
-// An empty or nil AllowedModels list permits any model.
-func (k *KeyInfo) IsModelAllowed(model string) bool {
-	if k == nil {
-		return false
-	}
-	if len(k.AllowedModels) == 0 {
-		return true
-	}
-	for _, m := range k.AllowedModels {
-		if strings.EqualFold(m, model) {
-			return true
-		}
-	}
-	return false
-}
-
-// PricingInfo represents pricing for a model/provider combination.
-type PricingInfo struct {
-	Model                   string
-	Provider                string
-	InputPerMTokMicros      int64
-	OutputPerMTokMicros     int64
-	CacheReadPerMTokMicros  int64
-	CacheWritePerMTokMicros int64
-}
+// PricingInfo is an alias to the core PricingInfo type.
+type PricingInfo = core.PricingInfo
 
 // Snapshot holds an immutable, in-memory view of the system configuration.
 type Snapshot struct {

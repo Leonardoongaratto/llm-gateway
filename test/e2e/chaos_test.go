@@ -58,7 +58,7 @@ func TestChaos_AC1F07_AC31_BudgetUnavailable_FailClosed(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 
 	// AC-31: Fail fast within 200ms
-	if elapsed > 300*time.Millisecond {
+	if elapsed > 200*time.Millisecond {
 		t.Errorf("fail-closed exceeded threshold: took %v (expected <= 200ms)", elapsed)
 	}
 

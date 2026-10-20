@@ -27,6 +27,7 @@ import (
 
 type Config struct {
 	ServiceName    string `env:"SERVICE_NAME" default:"control"`
+	Host           string `env:"HOST" default:""`
 	HTTPPort       int    `env:"HTTP_PORT" default:"8790"`
 	GRPCPort       int    `env:"GRPC_PORT" default:"9102"`
 	LogLevel       string `env:"LOG_LEVEL" default:"info"`
@@ -143,6 +144,7 @@ func run(ctx context.Context, cfg Config, opts ...RunOption) error {
 
 	srvCfg := service.Config{
 		ServiceName:  cfg.ServiceName,
+		Host:         cfg.Host,
 		HTTPPort:     cfg.HTTPPort,
 		GRPCPort:     cfg.GRPCPort,
 		LogLevel:     cfg.LogLevel,

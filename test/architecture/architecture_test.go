@@ -11,6 +11,7 @@ import (
 type pkgInfo struct {
 	ImportPath   string   `json:"ImportPath"`
 	Imports      []string `json:"Imports"`
+	Deps         []string `json:"Deps"`
 	TestImports  []string `json:"TestImports"`
 	XTestImports []string `json:"XTestImports"`
 }
@@ -96,7 +97,27 @@ func TestArchitecture_MicroserviceIsolation(t *testing.T) {
 	}
 }
 
-// TestArchitecture_CoreDomainPurity verifies that internal/*/core never imports database/sql or transport.
+func isForbiddenDependency(dep string, forbiddenTransport []string) bool {
+	if dep == "database/sql/driver" || dep == "database/sql/internal" {
+		return false
+	}
+	for _, forbidden := range forbiddenTransport {
+		if strings.Contains(dep, forbidden) {
+			return true
+		}
+	}
+	return false
+}
+
+func verifyCorePackagePurity(t *testing.T, p pkgInfo, forbidden []string) {
+	for _, dep := range p.Deps {
+		if isForbiddenDependency(dep, forbidden) {
+			t.Errorf("core domain %s transitively depends on transport/db %s", p.ImportPath, dep)
+		}
+	}
+}
+
+// TestArchitecture_CoreDomainPurity verifies that internal/*/core never imports database/sql or transport, directly or transitively.
 func TestArchitecture_CoreDomainPurity(t *testing.T) {
 	packages := loadPackages(t, "./internal/...")
 
@@ -111,15 +132,8 @@ func TestArchitecture_CoreDomainPurity(t *testing.T) {
 	}
 
 	for _, p := range packages {
-		if !strings.HasSuffix(p.ImportPath, "/core") {
-			continue
-		}
-		for _, imp := range p.Imports {
-			for _, forbidden := range forbiddenTransport {
-				if strings.Contains(imp, forbidden) {
-					t.Errorf("core domain %s must not import transport/db %s", p.ImportPath, imp)
-				}
-			}
+		if strings.HasSuffix(p.ImportPath, "/core") {
+			verifyCorePackagePurity(t, p, forbiddenTransport)
 		}
 	}
 }

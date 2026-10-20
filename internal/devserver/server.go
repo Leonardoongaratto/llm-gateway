@@ -3,7 +3,6 @@ package devserver
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +17,7 @@ import (
 	controlv1 "github.com/Leonardoongaratto/llm-gateway/gen/lgw/control/v1"
 	budgetcore "github.com/Leonardoongaratto/llm-gateway/internal/budget/core"
 	budgetgrpc "github.com/Leonardoongaratto/llm-gateway/internal/budget/grpcapi"
+	budgethttp "github.com/Leonardoongaratto/llm-gateway/internal/budget/httpapi"
 	budgetoutbox "github.com/Leonardoongaratto/llm-gateway/internal/budget/outbox"
 	budgetstore "github.com/Leonardoongaratto/llm-gateway/internal/budget/store"
 	budgetsweeper "github.com/Leonardoongaratto/llm-gateway/internal/budget/sweeper"
@@ -34,7 +34,10 @@ import (
 	gatewaycore "github.com/Leonardoongaratto/llm-gateway/internal/gateway/core"
 	gatewayevents "github.com/Leonardoongaratto/llm-gateway/internal/gateway/events"
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/provider"
+	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/provider/anthropic"
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/provider/fake"
+	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/provider/gemini"
+	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/provider/openai"
 	gatewayrouter "github.com/Leonardoongaratto/llm-gateway/internal/gateway/router"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/grpcx"
 	"github.com/Leonardoongaratto/llm-gateway/internal/platform/health"
@@ -53,6 +56,7 @@ import (
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"google.golang.org/grpc"
 )
 
@@ -74,6 +78,7 @@ type Config struct {
 	KeyPepper        string
 	LogLevel         string
 	TempDir          string
+	SpanProcessor    sdktrace.SpanProcessor
 }
 
 func DefaultConfig() Config {
@@ -111,6 +116,7 @@ type Cluster struct {
 	controlStore *controlstore.Store
 	usageStore   *usagestore.Store
 	authMgrs     []*gatewayauth.Manager
+	errChan      chan error
 
 	mu         sync.Mutex
 	cancelBdg  context.CancelFunc
@@ -121,6 +127,11 @@ type Cluster struct {
 	cancelCtrl context.CancelFunc
 
 	wg sync.WaitGroup
+}
+
+// Errors returns the channel delivering background service runtime and startup errors.
+func (c *Cluster) Errors() <-chan error {
+	return c.errChan
 }
 
 type Option func(*Cluster)
@@ -136,6 +147,7 @@ func NewCluster(cfg Config, opts ...Option) (*Cluster, error) {
 		cfg:       cfg,
 		logWriter: io.Writer(os.Stdout),
 		tempDir:   cfg.TempDir,
+		errChan:   make(chan error, 16),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -339,64 +351,44 @@ func (c *Cluster) seedData(ctx context.Context) error {
 	return nil
 }
 
+func (c *Cluster) launchService(ctx context.Context, name string, starter func(context.Context) error, assignCancel func(context.CancelFunc)) {
+	svcCtx, cancel := context.WithCancel(ctx)
+	assignCancel(cancel)
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		if err := starter(svcCtx); err != nil && !errors.Is(err, context.Canceled) {
+			select {
+			case c.errChan <- fmt.Errorf("%s service error: %w", name, err):
+			default:
+			}
+		}
+	}()
+}
+
 func (c *Cluster) Start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	bCtx, bCancel := context.WithCancel(ctx)
-	c.cancelBdg = bCancel
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		_ = c.startBudget(bCtx)
-	}()
-
-	ctrlCtx, ctrlCancel := context.WithCancel(ctx)
-	c.cancelCtrl = ctrlCancel
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		_ = c.startControl(ctrlCtx)
-	}()
-
-	uCtx, uCancel := context.WithCancel(ctx)
-	c.cancelUsg = uCancel
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		_ = c.startUsage(uCtx)
-	}()
+	c.launchService(ctx, "budget", c.startBudget, func(cancel context.CancelFunc) { c.cancelBdg = cancel })
+	c.launchService(ctx, "control", c.startControl, func(cancel context.CancelFunc) { c.cancelCtrl = cancel })
+	c.launchService(ctx, "usage", c.startUsage, func(cancel context.CancelFunc) { c.cancelUsg = cancel })
 
 	time.Sleep(100 * time.Millisecond)
 
-	gw1Ctx, gw1Cancel := context.WithCancel(ctx)
-	c.cancelGw1 = gw1Cancel
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		_ = c.startGatewayInstance(gw1Ctx, c.cfg.GatewayPort, "gateway-1")
-	}()
+	c.launchService(ctx, "gateway-1", func(sCtx context.Context) error {
+		return c.startGatewayInstance(sCtx, c.cfg.GatewayPort, "gateway-1")
+	}, func(cancel context.CancelFunc) { c.cancelGw1 = cancel })
 
 	if c.cfg.Gateway2Port > 0 {
-		gw2Ctx, gw2Cancel := context.WithCancel(ctx)
-		c.cancelGw2 = gw2Cancel
-		c.wg.Add(1)
-		go func() {
-			defer c.wg.Done()
-			_ = c.startGatewayInstance(gw2Ctx, c.cfg.Gateway2Port, "gateway-2")
-		}()
+		c.launchService(ctx, "gateway-2", func(sCtx context.Context) error {
+			return c.startGatewayInstance(sCtx, c.cfg.Gateway2Port, "gateway-2")
+		}, func(cancel context.CancelFunc) { c.cancelGw2 = cancel })
 	}
 
 	time.Sleep(100 * time.Millisecond)
 
-	edgeCtx, edgeCancel := context.WithCancel(ctx)
-	c.cancelEdge = edgeCancel
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		_ = c.startEdge(edgeCtx)
-	}()
-
+	c.launchService(ctx, "edge proxy", c.startEdge, func(cancel context.CancelFunc) { c.cancelEdge = cancel })
 	return nil
 }
 
@@ -413,13 +405,7 @@ func (c *Cluster) StartBudget(ctx context.Context) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.cancelBdg == nil {
-		bCtx, bCancel := context.WithCancel(ctx)
-		c.cancelBdg = bCancel
-		c.wg.Add(1)
-		go func() {
-			defer c.wg.Done()
-			_ = c.startBudget(bCtx)
-		}()
+		c.launchService(ctx, "budget", c.startBudget, func(cancel context.CancelFunc) { c.cancelBdg = cancel })
 	}
 }
 
@@ -436,13 +422,7 @@ func (c *Cluster) StartUsage(ctx context.Context) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.cancelUsg == nil {
-		uCtx, uCancel := context.WithCancel(ctx)
-		c.cancelUsg = uCancel
-		c.wg.Add(1)
-		go func() {
-			defer c.wg.Done()
-			_ = c.startUsage(uCtx)
-		}()
+		c.launchService(ctx, "usage", c.startUsage, func(cancel context.CancelFunc) { c.cancelUsg = cancel })
 	}
 }
 
@@ -462,10 +442,11 @@ func (c *Cluster) startBudget(ctx context.Context) error {
 	checker.RegisterCheck("budget_db", c.budgetDB.PingContext)
 
 	srvCfg := service.Config{
-		ServiceName: "budget",
-		HTTPPort:    c.cfg.BudgetPort,
-		GRPCPort:    c.cfg.BudgetGRPCPort,
-		LogLevel:    c.cfg.LogLevel,
+		ServiceName:   "budget",
+		HTTPPort:      c.cfg.BudgetPort,
+		GRPCPort:      c.cfg.BudgetGRPCPort,
+		LogLevel:      c.cfg.LogLevel,
+		SpanProcessor: c.cfg.SpanProcessor,
 	}
 
 	srvOpts := service.Options{
@@ -475,10 +456,9 @@ func (c *Cluster) startBudget(ctx context.Context) error {
 			budgetv1.RegisterBudgetServiceServer(srv, budgetgrpc.New(c.budgetStore))
 		},
 		RegisterHTTP: func(mux *http.ServeMux) {
-			mux.HandleFunc("POST /admin/limits", func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-			})
+			adminHandler := budgethttp.NewHandler(c.budgetStore, budgethttp.Config{AdminToken: c.cfg.AdminToken})
+			mux.Handle("/admin/limits", adminHandler)
+			mux.Handle("/admin/limits/", adminHandler)
 		},
 	}
 
@@ -493,10 +473,11 @@ func (c *Cluster) startControl(ctx context.Context) error {
 	checker.RegisterCheck("control_db", c.controlDB.PingContext)
 
 	srvCfg := service.Config{
-		ServiceName: "control",
-		HTTPPort:    c.cfg.ControlPort,
-		GRPCPort:    c.cfg.ControlGRPCPort,
-		LogLevel:    c.cfg.LogLevel,
+		ServiceName:   "control",
+		HTTPPort:      c.cfg.ControlPort,
+		GRPCPort:      c.cfg.ControlGRPCPort,
+		LogLevel:      c.cfg.LogLevel,
+		SpanProcessor: c.cfg.SpanProcessor,
 	}
 
 	adminHandler := controlhttp.NewHandler(c.controlStore, controlhttp.Config{
@@ -533,9 +514,10 @@ func (c *Cluster) startUsage(ctx context.Context) error {
 	checker.RegisterCheck("usage_db", c.usageDB.PingContext)
 
 	srvCfg := service.Config{
-		ServiceName: "usage",
-		HTTPPort:    c.cfg.UsagePort,
-		LogLevel:    c.cfg.LogLevel,
+		ServiceName:   "usage",
+		HTTPPort:      c.cfg.UsagePort,
+		LogLevel:      c.cfg.LogLevel,
+		SpanProcessor: c.cfg.SpanProcessor,
 	}
 
 	claudeImporter := usageclaude.New(c.usageStore, "", c.logger)
@@ -584,14 +566,7 @@ func (c *Cluster) buildGatewayCoreService(ctx context.Context) (*gatewaycore.Ser
 	pub := gatewayevents.NewPublisher(c.js, gatewayevents.WithLogger(c.logger))
 	r := gatewayrouter.New()
 
-	if c.cfg.MockProvider {
-		r.Register("openai", fake.New(fake.WithName("openai"), fake.WithContent("Fake OpenAI response from dev server")))
-		r.Register("anthropic", fake.New(fake.WithName("anthropic"), fake.WithContent("Fake Anthropic response from dev server")))
-		r.Register("gemini", fake.New(fake.WithName("gemini"), fake.WithContent("Fake Gemini response from dev server")))
-	}
-	for name, prov := range c.cfg.Providers {
-		r.Register(name, prov)
-	}
+	c.registerProviders(r)
 
 	localCache := gatewaycache.New(gatewaycache.WithCapacity(10000), gatewaycache.WithTTL(5*time.Minute))
 	svc := gatewaycore.NewService(gatewaycore.ServiceConfig{
@@ -604,6 +579,36 @@ func (c *Cluster) buildGatewayCoreService(ctx context.Context) (*gatewaycore.Ser
 	})
 
 	return svc, authMgr, nil
+}
+
+func getFirstEnv(keys ...string) string {
+	for _, k := range keys {
+		if val := os.Getenv(k); val != "" {
+			return val
+		}
+	}
+	return ""
+}
+
+func (c *Cluster) registerProviders(r *gatewayrouter.Router) {
+	if c.cfg.MockProvider {
+		r.Register("openai", fake.New(fake.WithName("openai"), fake.WithContent("Fake OpenAI response from dev server")))
+		r.Register("anthropic", fake.New(fake.WithName("anthropic"), fake.WithContent("Fake Anthropic response from dev server")))
+		r.Register("gemini", fake.New(fake.WithName("gemini"), fake.WithContent("Fake Gemini response from dev server")))
+	} else {
+		if key := getFirstEnv("LGW_OPENAI_API_KEY", "OPENAI_API_KEY"); key != "" {
+			r.Register("openai", openai.New(key))
+		}
+		if key := getFirstEnv("LGW_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"); key != "" {
+			r.Register("anthropic", anthropic.New(key))
+		}
+		if key := getFirstEnv("LGW_GEMINI_API_KEY", "GEMINI_API_KEY"); key != "" {
+			r.Register("gemini", gemini.New(key))
+		}
+	}
+	for name, prov := range c.cfg.Providers {
+		r.Register(name, prov)
+	}
 }
 
 func (c *Cluster) startGatewayInstance(ctx context.Context, port int, name string) error {
@@ -620,7 +625,10 @@ func (c *Cluster) startGatewayInstance(ctx context.Context, port int, name strin
 		return nil
 	})
 
-	otelProv, err := otel.Init(ctx, otel.Config{ServiceName: name})
+	otelProv, err := otel.Init(ctx, otel.Config{
+		ServiceName:   name,
+		SpanProcessor: c.cfg.SpanProcessor,
+	})
 	if err != nil {
 		return fmt.Errorf("gateway otel init: %w", err)
 	}
@@ -679,7 +687,10 @@ func (c *Cluster) startEdge(ctx context.Context) error {
 	}
 
 	checker := health.New()
-	otelProv, err := otel.Init(ctx, otel.Config{ServiceName: "edge"})
+	otelProv, err := otel.Init(ctx, otel.Config{
+		ServiceName:   "edge",
+		SpanProcessor: c.cfg.SpanProcessor,
+	})
 	if err != nil {
 		return fmt.Errorf("edge otel init: %w", err)
 	}
@@ -795,8 +806,18 @@ func Run(ctx context.Context, cfg Config, opts ...Option) error {
 		return err
 	}
 
+	select {
+	case err := <-cluster.Errors():
+		return err
+	case <-time.After(200 * time.Millisecond):
+	}
+
 	cluster.PrintBanner()
 
-	<-ctx.Done()
-	return nil
+	select {
+	case err := <-cluster.Errors():
+		return err
+	case <-ctx.Done():
+		return nil
+	}
 }

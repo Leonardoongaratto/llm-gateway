@@ -3,16 +3,16 @@ services:
     image: postgres:16-alpine
     container_name: lgw-postgres
     environment:
-      POSTGRES_USER: lgw
-      POSTGRES_PASSWORD: lgwpass
-      POSTGRES_DB: lgw
+      POSTGRES_USER: ${LGW_POSTGRES_USER:-lgw}
+      POSTGRES_PASSWORD: ${LGW_POSTGRES_PASSWORD:-lgwpass}
+      POSTGRES_DB: ${LGW_POSTGRES_DB:-lgw}
     ports:
       - "5432:5432"
     volumes:
       - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U lgw -d lgw"]
+      test: ["CMD-SHELL", "pg_isready -U ${LGW_POSTGRES_USER:-lgw} -d ${LGW_POSTGRES_DB:-lgw}"]
       interval: 3s
       timeout: 3s
       retries: 10
@@ -40,6 +40,12 @@ services:
       - "4318:4318"   # OTLP HTTP receiver
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:16686/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 2s
 
   prometheus:
     image: prom/prometheus:v2.54.0
@@ -48,6 +54,12 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
       - "9090:9090"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:9090/-/healthy || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 2s
     depends_on:
       - edge
 
@@ -59,16 +71,17 @@ services:
         TARGET: control
     container_name: lgw-control
     environment:
-      SERVICE_NAME: control
-      HTTP_PORT: 8790
-      GRPC_PORT: 9102
-      DATABASE_DRIVER: postgres
-      DATABASE_DSN: "postgres://lgw:lgwpass@postgres:5432/lgw_control?sslmode=disable"
-      NATS_URL: "nats://nats:4222"
-      ADMIN_TOKEN: "compose-admin-token"
-      KEY_PEPPER: "compose-pepper-secret-32-chars!"
-      OTEL_ENDPOINT: "http://jaeger:4318"
-      LOG_LEVEL: "info"
+      LGW_SERVICE_NAME: control
+      LGW_HOST: "0.0.0.0"
+      LGW_HTTP_PORT: 8790
+      LGW_GRPC_PORT: 9102
+      LGW_DATABASE_DRIVER: postgres
+      LGW_DATABASE_DSN: "postgres://${LGW_POSTGRES_USER:-lgw}:${LGW_POSTGRES_PASSWORD:-lgwpass}@postgres:5432/lgw_control?sslmode=disable"
+      LGW_NATS_URL: "nats://nats:4222"
+      LGW_ADMIN_TOKEN: "${LGW_ADMIN_TOKEN:?LGW_ADMIN_TOKEN is required}"
+      LGW_KEY_PEPPER: "${LGW_KEY_PEPPER:?LGW_KEY_PEPPER is required}"
+      LGW_OTEL_ENDPOINT: "http://jaeger:4318"
+      LGW_LOG_LEVEL: "info"
     ports:
       - "8790:8790"
       - "9102:9102"
@@ -92,15 +105,16 @@ services:
         TARGET: budget
     container_name: lgw-budget
     environment:
-      SERVICE_NAME: budget
-      HTTP_PORT: 8792
-      GRPC_PORT: 9101
-      DATABASE_DRIVER: postgres
-      DATABASE_DSN: "postgres://lgw:lgwpass@postgres:5432/lgw_budget?sslmode=disable"
-      NATS_URL: "nats://nats:4222"
-      ADMIN_TOKEN: "compose-admin-token"
-      OTEL_ENDPOINT: "http://jaeger:4318"
-      LOG_LEVEL: "info"
+      LGW_SERVICE_NAME: budget
+      LGW_HOST: "0.0.0.0"
+      LGW_HTTP_PORT: 8792
+      LGW_GRPC_PORT: 9101
+      LGW_DATABASE_DRIVER: postgres
+      LGW_DATABASE_DSN: "postgres://${LGW_POSTGRES_USER:-lgw}:${LGW_POSTGRES_PASSWORD:-lgwpass}@postgres:5432/lgw_budget?sslmode=disable"
+      LGW_NATS_URL: "nats://nats:4222"
+      LGW_ADMIN_TOKEN: "${LGW_ADMIN_TOKEN:?LGW_ADMIN_TOKEN is required}"
+      LGW_OTEL_ENDPOINT: "http://jaeger:4318"
+      LGW_LOG_LEVEL: "info"
     ports:
       - "8792:8792"
       - "9101:9101"
@@ -124,14 +138,15 @@ services:
         TARGET: usage
     container_name: lgw-usage
     environment:
-      SERVICE_NAME: usage
-      HTTP_PORT: 8791
-      DATABASE_DRIVER: postgres
-      DATABASE_DSN: "postgres://lgw:lgwpass@postgres:5432/lgw_usage?sslmode=disable"
-      NATS_URL: "nats://nats:4222"
-      ADMIN_TOKEN: "compose-admin-token"
-      OTEL_ENDPOINT: "http://jaeger:4318"
-      LOG_LEVEL: "info"
+      LGW_SERVICE_NAME: usage
+      LGW_HOST: "0.0.0.0"
+      LGW_HTTP_PORT: 8791
+      LGW_DATABASE_DRIVER: postgres
+      LGW_DATABASE_DSN: "postgres://${LGW_POSTGRES_USER:-lgw}:${LGW_POSTGRES_PASSWORD:-lgwpass}@postgres:5432/lgw_usage?sslmode=disable"
+      LGW_NATS_URL: "nats://nats:4222"
+      LGW_ADMIN_TOKEN: "${LGW_ADMIN_TOKEN:?LGW_ADMIN_TOKEN is required}"
+      LGW_OTEL_ENDPOINT: "http://jaeger:4318"
+      LGW_LOG_LEVEL: "info"
     ports:
       - "8791:8791"
     depends_on:
@@ -154,14 +169,18 @@ services:
         TARGET: gateway
     container_name: lgw-gateway
     environment:
-      SERVICE_NAME: gateway
-      HTTP_PORT: 8788
-      CONTROL_ADDR: "control:9102"
-      BUDGET_ADDR: "budget:9101"
-      NATS_URL: "nats://nats:4222"
-      KEY_PEPPER: "compose-pepper-secret-32-chars!"
-      OTEL_ENDPOINT: "http://jaeger:4318"
-      LOG_LEVEL: "info"
+      LGW_SERVICE_NAME: gateway
+      LGW_HOST: "0.0.0.0"
+      LGW_HTTP_PORT: 8788
+      LGW_CONTROL_ADDR: "control:9102"
+      LGW_BUDGET_ADDR: "budget:9101"
+      LGW_NATS_URL: "nats://nats:4222"
+      LGW_KEY_PEPPER: "${LGW_KEY_PEPPER:?LGW_KEY_PEPPER is required}"
+      LGW_OPENAI_API_KEY: "${LGW_OPENAI_API_KEY:-}"
+      LGW_ANTHROPIC_API_KEY: "${LGW_ANTHROPIC_API_KEY:-}"
+      LGW_GEMINI_API_KEY: "${LGW_GEMINI_API_KEY:-}"
+      LGW_OTEL_ENDPOINT: "http://jaeger:4318"
+      LGW_LOG_LEVEL: "info"
     ports:
       - "8788:8788"
     depends_on:
@@ -186,13 +205,15 @@ services:
         TARGET: edge
     container_name: lgw-edge
     environment:
-      HTTP_PORT: 8787
-      GATEWAY_URL: "http://gateway:8788"
-      CONTROL_URL: "http://control:8790"
-      USAGE_URL: "http://usage:8791"
-      BUDGET_URL: "http://budget:8792"
-      OTEL_ENDPOINT: "http://jaeger:4318"
-      LOG_LEVEL: "info"
+      LGW_SERVICE_NAME: edge
+      LGW_HOST: "0.0.0.0"
+      LGW_HTTP_PORT: 8787
+      LGW_GATEWAY_URL: "http://gateway:8788"
+      LGW_CONTROL_URL: "http://control:8790"
+      LGW_USAGE_URL: "http://usage:8791"
+      LGW_BUDGET_URL: "http://budget:8792"
+      LGW_OTEL_ENDPOINT: "http://jaeger:4318"
+      LGW_LOG_LEVEL: "info"
     ports:
       - "8787:8787"
     depends_on:

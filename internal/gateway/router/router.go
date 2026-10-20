@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/auth"
+	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/core"
 	"github.com/Leonardoongaratto/llm-gateway/internal/gateway/provider"
 	"github.com/Leonardoongaratto/llm-gateway/internal/kernel/llm"
 )
@@ -15,21 +15,11 @@ import (
 // FallbackHook is invoked whenever automatic fallback transitions from one provider to another.
 type FallbackHook func(ctx context.Context, requestID, fromProvider, toProvider, reason string)
 
-// ExecutionResult contains the response and routing metadata for a non-streaming call.
-type ExecutionResult struct {
-	Response     *llm.Response
-	ProviderUsed string
-	ModelUsed    string
-	FallbackFrom string
-}
+// ExecutionResult is an alias to the core ExecutionResult type.
+type ExecutionResult = core.ExecutionResult
 
-// StreamExecutionResult contains the stream channel and routing metadata for a streaming call.
-type StreamExecutionResult struct {
-	Stream       <-chan llm.Chunk
-	ProviderUsed string
-	ModelUsed    string
-	FallbackFrom string
-}
+// StreamExecutionResult is an alias to the core StreamExecutionResult type.
+type StreamExecutionResult = core.StreamExecutionResult
 
 // Router dispatches requests to providers resolving logical models and performing selective fallback.
 type Router struct {
@@ -143,7 +133,7 @@ func (r *Router) notifyFallback(ctx context.Context, reqID string, i int, chain 
 }
 
 // Execute dispatches a non-streaming request through the logical model fallback chain.
-func (r *Router) Execute(ctx context.Context, snap *auth.Snapshot, req *llm.Request) (*ExecutionResult, error) {
+func (r *Router) Execute(ctx context.Context, snap core.Snapshot, req *llm.Request) (*ExecutionResult, error) {
 	chain := snap.ResolveChain(req.Model)
 	var lastFallbackFrom string
 	var lastErr error
@@ -187,7 +177,7 @@ func (r *Router) Execute(ctx context.Context, snap *auth.Snapshot, req *llm.Requ
 }
 
 // ExecuteStream initiates a streaming request with pre-flight fallback if stream creation fails.
-func (r *Router) ExecuteStream(ctx context.Context, snap *auth.Snapshot, req *llm.Request) (*StreamExecutionResult, error) {
+func (r *Router) ExecuteStream(ctx context.Context, snap core.Snapshot, req *llm.Request) (*StreamExecutionResult, error) {
 	chain := snap.ResolveChain(req.Model)
 	var lastFallbackFrom string
 	var lastErr error

@@ -47,17 +47,24 @@ func (h *Handler) checkServiceHealth(ctx context.Context, target checkTarget) st
 }
 
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
-	gwBaseURL := h.cfg.GatewayURL
-	if gwBaseURL == "" && len(h.cfg.GatewayURLs) > 0 {
-		gwBaseURL = h.cfg.GatewayURLs[0]
+	targets := make([]checkTarget, 0, len(h.cfg.GatewayURLs)+3)
+	if len(h.cfg.GatewayURLs) > 0 {
+		for i, gwURL := range h.cfg.GatewayURLs {
+			name := "gateway"
+			if len(h.cfg.GatewayURLs) > 1 {
+				name = fmt.Sprintf("gateway-%d", i+1)
+			}
+			targets = append(targets, checkTarget{name: name, baseURL: gwURL})
+		}
+	} else if h.cfg.GatewayURL != "" {
+		targets = append(targets, checkTarget{name: "gateway", baseURL: h.cfg.GatewayURL})
 	}
 
-	targets := []checkTarget{
-		{name: "gateway", baseURL: gwBaseURL},
-		{name: "control", baseURL: h.cfg.ControlURL},
-		{name: "budget", baseURL: h.cfg.BudgetURL},
-		{name: "usage", baseURL: h.cfg.UsageURL},
-	}
+	targets = append(targets,
+		checkTarget{name: "control", baseURL: h.cfg.ControlURL},
+		checkTarget{name: "budget", baseURL: h.cfg.BudgetURL},
+		checkTarget{name: "usage", baseURL: h.cfg.UsageURL},
+	)
 
 	results := make(map[string]string, len(targets))
 	var (

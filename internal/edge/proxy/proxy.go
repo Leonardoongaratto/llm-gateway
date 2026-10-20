@@ -58,7 +58,13 @@ func createReverseProxy(targetURL string) (*httputil.ReverseProxy, error) {
 			pr.Out.Host = target.Host
 			otel.GetTextMapPropagator().Inject(pr.Out.Context(), propagation.HeaderCarrier(pr.Out.Header))
 		},
-		FlushInterval: -1, // Immediate flushing for SSE and streaming
+		FlushInterval: -1,
+		ModifyResponse: func(resp *http.Response) error {
+			if reqID := resp.Request.Header.Get("X-Request-Id"); reqID != "" {
+				resp.Header.Set("X-Request-Id", reqID)
+			}
+			return nil
+		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, proxyErr error) {
 			var maxBytesErr *http.MaxBytesError
 			if errors.As(proxyErr, &maxBytesErr) {
@@ -72,8 +78,7 @@ func createReverseProxy(targetURL string) (*httputil.ReverseProxy, error) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadGateway)
 			_ = json.NewEncoder(w).Encode(map[string]string{
-				"error":   "upstream service unavailable",
-				"details": proxyErr.Error(),
+				"error": "upstream service unavailable",
 			})
 		},
 	}
@@ -133,7 +138,6 @@ func New(cfg Config) (*Handler, error) {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// 1. Enforce body size limit
 	if r.ContentLength > h.maxBodyBytes {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
@@ -142,21 +146,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
 
-	// 2. Request ID injection/preservation
 	reqID := r.Header.Get("X-Request-Id")
 	if reqID == "" {
 		reqID = uuid.NewString()
 		r.Header.Set("X-Request-Id", reqID)
 	}
-	w.Header().Set("X-Request-Id", reqID)
 
-	// 3. Extract incoming TraceContext
 	ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
 	r = r.WithContext(ctx)
 
-	// 4. Route matching
 	path := r.URL.Path
-
 	switch {
 	case path == "/health":
 		h.handleHealth(w, r)
